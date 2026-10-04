@@ -9,15 +9,19 @@ export function isEmbedMode(): boolean {
   return new URLSearchParams(window.location.search).get('embed') === '1';
 }
 
+/** Always allowed, so Toolwala works even before a Vercel env var is set. */
+const DEFAULT_PARENT_ORIGINS = ['https://toolwala.co', 'https://www.toolwala.co'];
+
 /** Comma-separated parent origins that may talk to the editor. */
 export function allowedOrigins(): string[] {
   const raw = import.meta.env.VITE_ALLOWED_ORIGINS ?? '';
-  const origins: string[] = [];
+  const origins = [...DEFAULT_PARENT_ORIGINS];
   for (const part of raw.split(',')) {
     const trimmed = part.trim();
     if (!trimmed) continue;
     try {
-      origins.push(new URL(trimmed).origin);
+      const origin = new URL(trimmed).origin;
+      if (!origins.includes(origin)) origins.push(origin);
     } catch {
       console.warn(`Ignoring invalid VITE_ALLOWED_ORIGINS entry: ${trimmed}`);
     }

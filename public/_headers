@@ -1,0 +1,12 @@
+# Netlify equivalent of vercel.json. Copied to dist/ by Vite.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/pdfjs/*
+  Cache-Control: public, max-age=604800
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+  Content-Security-Policy: frame-ancestors 'self' https://toolwala.com https://www.toolwala.com

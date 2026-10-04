@@ -1,0 +1,10 @@
+node_modules
+dist
+public/pdfjs
+*.local
+.DS_Store
+.vercel
+test-pdfs
+.env
+.env.*
+!.env.example

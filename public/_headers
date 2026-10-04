@@ -11,3 +11,4 @@
   Permissions-Policy: camera=(), microphone=(), geolocation=()
   Content-Security-Policy: frame-ancestors 'self' https://toolwala.co https://www.toolwala.co https://toolwala.com https://www.toolwala.com
   Cross-Origin-Resource-Policy: cross-origin
+  Cross-Origin-Embedder-Policy: credentialless

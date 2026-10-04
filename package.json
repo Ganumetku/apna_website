@@ -1,7 +1,7 @@
 {
   "name": "edit-pdf-engine",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "scripts": {
     "copy:pdfjs": "node scripts/copy-pdfjs-assets.mjs",

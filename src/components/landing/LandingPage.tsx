@@ -14,6 +14,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import seo from '../../content/landingSeo.json';
 import { Logo } from '../common/Logo';
 
 async function open(file: File) {
@@ -79,10 +80,10 @@ export function LandingPage() {
 
       <main className="mx-auto max-w-6xl px-4 pb-16 sm:px-6">
         <section className="pt-8 text-center sm:pt-14">
-          <h1 className="text-4xl font-extrabold tracking-tight text-slate-900 sm:text-5xl">Edit PDF</h1>
+          <h1 className="text-4xl font-extrabold tracking-tight text-slate-900 sm:text-5xl">Edit PDF Online Free</h1>
           <p className="mx-auto mt-4 max-w-2xl text-base text-slate-600 sm:text-lg">
-            Add text, images, shapes, highlights and free-hand drawings to any PDF. Fast, free and fully private — everything happens in
-            your browser.
+            Add text, images, shapes and highlights to a PDF in your browser. It is free, there is no signup, and the file stays on your
+            device.
           </p>
 
           <div
@@ -104,6 +105,7 @@ export function LandingPage() {
               ref={inputRef}
               type="file"
               accept="application/pdf,.pdf"
+              aria-label="Choose a PDF file"
               className="hidden"
               onChange={(e) => {
                 handleFiles(e.target.files);
@@ -141,10 +143,130 @@ export function LandingPage() {
             })}
           </ul>
         </section>
+
+        <LandingArticle />
       </main>
 
-      <footer className="pb-8 text-center text-xs text-slate-400">Built with PDF.js, Fabric.js and pdf-lib · Runs 100% client-side</footer>
+      <footer className="border-t border-slate-200 bg-white">
+        <nav aria-label="Toolwala" className="mx-auto flex max-w-6xl flex-wrap gap-x-5 gap-y-2 px-4 py-6 text-sm text-slate-700 sm:px-6">
+          <a className="underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500" href="https://toolwala.co/">
+            Toolwala home
+          </a>
+          <a className="underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500" href="https://toolwala.co/">
+            All tools
+          </a>
+          <a className="underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500" href="https://toolwala.co/privacy-policy/">
+            Privacy Policy
+          </a>
+          <a className="underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500" href="https://toolwala.co/terms/">
+            Terms
+          </a>
+          <a className="underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500" href="https://toolwala.co/contact/">
+            Contact
+          </a>
+        </nav>
+        <p className="pb-6 text-center text-xs text-slate-500">Built with PDF.js, Fabric.js and pdf-lib. Runs in your browser.</p>
+      </footer>
     </div>
+  );
+}
+
+const linkClass =
+  'font-medium text-slate-900 underline decoration-slate-300 underline-offset-2 hover:decoration-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500';
+
+function LandingArticle() {
+  return (
+    <article className="mx-auto mt-16 max-w-3xl space-y-12 text-left text-slate-700">
+      <section>
+        <h2 className="text-2xl font-bold text-slate-900">{seo.howTo.heading}</h2>
+        <p className="mt-3 text-base leading-relaxed">{seo.howTo.lede}</p>
+        <ol className="mt-5 list-decimal space-y-4 pl-5">
+          {seo.howTo.steps.map((step, index) => (
+            <li key={step.name}>
+              <h3 className="font-semibold text-slate-900">{step.name}</h3>
+              <p className="mt-1 leading-relaxed">
+                {index === 3 ? (
+                  <>
+                    Save the file to your computer when you are done. If you started on{' '}
+                    <a className={linkClass} href="https://toolwala.co/">
+                      Toolwala
+                    </a>
+                    , Save &amp; Continue hands the PDF back to that page.
+                  </>
+                ) : (
+                  step.text
+                )}
+              </p>
+            </li>
+          ))}
+        </ol>
+      </section>
+
+      <section>
+        <h2 className="text-2xl font-bold text-slate-900">{seo.features.heading}</h2>
+        <p className="mt-3 leading-relaxed">{seo.features.lede}</p>
+        <ul className="mt-4 list-disc space-y-2 pl-5 leading-relaxed">
+          {seo.features.items.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      </section>
+
+      <section>
+        <h2 className="text-2xl font-bold text-slate-900">{seo.privacy.heading}</h2>
+        {seo.privacy.paragraphs.map((paragraph) =>
+          paragraph.endsWith('free tools on Toolwala.') ? (
+            <p key={paragraph} className="mt-3 leading-relaxed">
+              The same private approach is used for the other{' '}
+              <a className={linkClass} href="https://toolwala.co/">
+                free tools on Toolwala
+              </a>
+              .
+            </p>
+          ) : (
+            <p key={paragraph} className="mt-3 leading-relaxed">
+              {paragraph}
+            </p>
+          ),
+        )}
+      </section>
+
+      <section>
+        <h2 className="text-2xl font-bold text-slate-900">{seo.limits.heading}</h2>
+        <ul className="mt-4 list-disc space-y-2 pl-5 leading-relaxed">
+          {seo.limits.items.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      </section>
+
+      <section>
+        <h2 className="text-2xl font-bold text-slate-900">{seo.hindi.heading}</h2>
+        {seo.hindi.paragraphs.map((paragraph) => (
+          <p key={paragraph} className="mt-3 leading-relaxed">
+            {paragraph}
+          </p>
+        ))}
+        <p lang="hi" className="mt-3 leading-relaxed text-slate-900">
+          {seo.hindi.example}
+        </p>
+        <p className="mt-3 leading-relaxed">{seo.hindi.after}</p>
+      </section>
+
+      <section>
+        <h2 className="text-2xl font-bold text-slate-900">{seo.faq.heading}</h2>
+        <div className="mt-4 divide-y divide-slate-200 border-y border-slate-200">
+          {seo.faq.items.map((item) => (
+            <details key={item.q} className="group py-3">
+              <summary className="cursor-pointer font-semibold text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500">
+                {item.q}
+              </summary>
+              <p className="mt-2 leading-relaxed">{item.a}</p>
+            </details>
+          ))}
+        </div>
+      </section>
+    </article>
   );
 }
 

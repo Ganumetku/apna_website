@@ -1,0 +1,102 @@
+{
+  "howTo": {
+    "heading": "How to edit a PDF online",
+    "lede": "You can edit pdf online in this tab. If you want to edit pdf without software, there is nothing to install.",
+    "steps": [
+      {
+        "name": "Upload your PDF",
+        "text": "Click Select PDF file, or drop the file on the box. It opens in this tab and is not sent to a server."
+      },
+      {
+        "name": "Pick a tool",
+        "text": "Choose text, image, a shape, the pen, highlight, underline, strikethrough, or white-out. To add text to pdf pages, click the text tool and then click the page."
+      },
+      {
+        "name": "Make your changes",
+        "text": "Type, draw, or drag the object into place. Undo is there if a change looks wrong, and zoom helps when the type is small."
+      },
+      {
+        "name": "Download the PDF",
+        "text": "Save the file to your computer when you are done. If you started on Toolwala, Save & Continue hands the PDF back to that page."
+      }
+    ]
+  },
+  "features": {
+    "heading": "What you can do with this PDF editor",
+    "lede": "This free pdf editor lists only what the buttons actually do.",
+    "items": [
+      "New text goes in a box. You set the font, size and colour, and Devanagari is included so Hindi typesets properly.",
+      "Click a line that is already on the page to change the words, as long as the line is ordinary horizontal text.",
+      "To add image to pdf pages, pick a picture, then drag it and resize the corners.",
+      "Rectangle, circle, line and arrow are there for a simple mark. The circle tool draws an ellipse.",
+      "The pen follows a mouse, a stylus, or your finger when you want a freehand note.",
+      "Drag across words to highlight pdf online. Underline and strikethrough are separate tools, and they do not delete the text under them.",
+      "Use the white-out box to white out pdf text, such as a number or a name you do not want left visible.",
+      "Undo and redo sit in the top bar. Zoom is at the bottom of the page when the type is hard to read."
+    ]
+  },
+  "privacy": {
+    "heading": "Your file stays on your device",
+    "paragraphs": [
+      "Nothing is uploaded. The browser reads the PDF from your disk and draws the pages in this tab. When you save, the new file is built here too.",
+      "To edit pdf in browser means Toolwala does not receive the document, and neither does the site that hosts this editor. There is no account tied to the file. Close the tab and the copy in memory goes with it.",
+      "You still have to trust the computer you are using. Anyone who can open that machine can open the PDF, the same as with an app installed on it.",
+      "The same private approach is used for the other free tools on Toolwala."
+    ]
+  },
+  "limits": {
+    "heading": "Things to know before you start",
+    "items": [
+      "Editing existing text works best on normal horizontal lines. Rotated text, or lines that sit on top of each other, may not become a clean box.",
+      "The original font is replaced by a similar one. A PDF often stores only a slice of the font, so an edited line can look a little different from the text around it.",
+      "A password-protected PDF opens after you type the password. The password stays in this tab. The saved file is made of page images, so you cannot select the old text in that download.",
+      "There is no signature tool. You also cannot delete pages or change their order yet.",
+      "A file over 50 MB asks you to confirm before it opens. A very large PDF can slow the tab or crash it, and a phone runs out of memory sooner than a laptop."
+    ]
+  },
+  "hindi": {
+    "heading": "Edit PDF in Hindi",
+    "paragraphs": [
+      "Type Hindi straight into a text box. The font draws Devanagari, including the joined letters, so a word does not fall apart into separate marks."
+    ],
+    "example": "यह पीडीएफ आपके डिवाइस पर ही रहता है।",
+    "after": "English and Hindi can share one box. If you want the Hindi to look like a native face, choose Noto Sans Devanagari."
+  },
+  "faq": {
+    "heading": "Frequently asked questions",
+    "items": [
+      {
+        "q": "Is it free?",
+        "a": "Yes. You can edit pdf free here, and there is no payment screen. The page does not ask for a card."
+      },
+      {
+        "q": "Do I need to sign up?",
+        "a": "No. This is a pdf editor no signup. Open the page, choose a file, and start."
+      },
+      {
+        "q": "Is my PDF uploaded anywhere?",
+        "a": "No. You edit pdf online in the browser, and the file is read from your device. It is not posted to a server."
+      },
+      {
+        "q": "Can I edit the original text in a PDF?",
+        "a": "Yes, when the line is normal horizontal text. Click it, change the words, and download. The font will be a close match, not always the exact face stored in the file."
+      },
+      {
+        "q": "Can I edit a password-protected PDF?",
+        "a": "Yes, if you know the password. The download is saved as pictures of the pages, because the protected file cannot be rewritten as ordinary text. You will not be able to select the original words in that copy."
+      },
+      {
+        "q": "Does it work on mobile?",
+        "a": "It runs in a phone browser. Small type is harder to tap, and a long PDF can run out of memory. For a big file, a computer is the safer choice."
+      },
+      {
+        "q": "Which file size works?",
+        "a": "Everyday PDFs are fine. Above 50 MB the page asks before opening the file. Very large files can make the browser slow or close the tab."
+      },
+      {
+        "q": "Why does the text look slightly different after editing?",
+        "a": "The file often stores only a piece of the original font. This editor does not have that exact font, so it uses a similar one. You can still set the size and the colour."
+      }
+    ]
+  }
+}

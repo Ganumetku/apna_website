@@ -81,7 +81,7 @@ export function LandingPage() {
         <section className="pt-8 text-center sm:pt-14">
           <h1 className="text-4xl font-extrabold tracking-tight text-slate-900 sm:text-5xl">Edit PDF</h1>
           <p className="mx-auto mt-4 max-w-2xl text-base text-slate-600 sm:text-lg">
-            Add text, images, shapes, highlights and free-hand drawings to any PDF. Fast, free and 100% private — everything happens in
+            Add text, images, shapes, highlights and free-hand drawings to any PDF. Fast, free and fully private — everything happens in
             your browser.
           </p>
 

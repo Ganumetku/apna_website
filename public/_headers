@@ -9,6 +9,6 @@
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
   Permissions-Policy: camera=(), microphone=(), geolocation=()
-  Content-Security-Policy: frame-ancestors 'self' https://toolwala.co https://www.toolwala.co https://toolwala.com https://www.toolwala.com
+  Content-Security-Policy: frame-ancestors 'self' https://toolwala.co https://www.toolwala.co https://toolwala.com https://www.toolwala.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: https://www.googletagmanager.com https://www.google-analytics.com; connect-src 'self' blob: data: https://www.google-analytics.com https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com; worker-src 'self' blob:
   Cross-Origin-Resource-Policy: cross-origin
   Cross-Origin-Embedder-Policy: credentialless

@@ -141,11 +141,27 @@ export function fontStack(id: FontId): string {
   return def.devanagari ? `"${def.family}"` : `"${def.family}", "${fallback.family}"`;
 }
 
-/** Inverse of `fontStack`: take the primary family of a CSS stack. */
+/**
+ * Overlay stack for a PDF line: the OS face that matches the PDF (Times New
+ * Roman, Verdana, …) so edited glyphs look like the printed ones, then our
+ * bundled family if that face is not installed.
+ */
+export function overlayFontStack(id: FontId, cssFamily?: string): string {
+  const fallback = fontStack(id);
+  const name = cssFamily?.trim();
+  if (!name) return fallback;
+  return `"${name}", ${fallback}`;
+}
+
+/** Inverse of `fontStack`: first bundled family in the CSS stack. */
 export function fontDefFromStack(stack: unknown): FontFamilyDef {
   if (typeof stack !== 'string') return FONT_FAMILIES[0];
-  const primary = stack.split(',')[0].trim().replace(/^["']|["']$/g, '').toLowerCase();
-  return byFamily.get(primary) ?? FONT_FAMILIES[0];
+  for (const part of stack.split(',')) {
+    const name = part.trim().replace(/^["']|["']$/g, '').toLowerCase();
+    const found = byFamily.get(name);
+    if (found) return found;
+  }
+  return FONT_FAMILIES[0];
 }
 
 export interface ResolvedVariant {

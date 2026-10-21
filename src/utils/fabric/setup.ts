@@ -8,16 +8,19 @@ declare module 'fabric' {
     kind?: ObjectKind;
     /** Set on objects that replace an original text line of the PDF (see textExtraction.ts). */
     sourceLineId?: string;
+    /** Original PDF line text; if the user doesn't change it we restore the printed glyphs. */
+    sourceOriginalText?: string;
   }
   interface SerializedObjectProps {
     id?: string;
     kind?: ObjectKind;
     sourceLineId?: string;
+    sourceOriginalText?: string;
   }
 }
 
 /** Extra props written by `toObject()` so they survive undo/redo and lazy page mounting. */
-FabricObject.customProperties = ['id', 'kind', 'sourceLineId'];
+FabricObject.customProperties = ['id', 'kind', 'sourceLineId', 'sourceOriginalText'];
 
 // Selection handles: brand colours + large touch targets for mobile.
 Object.assign(InteractiveFabricObject.ownDefaults, {

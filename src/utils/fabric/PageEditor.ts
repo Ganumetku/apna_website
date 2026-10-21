@@ -1,8 +1,8 @@
-import { ActiveSelection, Canvas, Color, PencilBrush, Rect, Textbox, util } from 'fabric';
+import { ActiveSelection, cache, Canvas, Color, PencilBrush, Rect, Textbox, util } from 'fabric';
 import type { Ellipse, FabricObject, Line, Path, TPointerEvent, TPointerEventInfo } from 'fabric';
 import { EMPTY_OBJECTS, editorStore } from '../../store/editorStore';
 import type { ObjectKind, PageInfo, SerializedObject, StyleState, ToolType } from '../../types';
-import { ensureFont, ensureFontsForObjects, fontStack, getFontDef } from '../fonts';
+import { ensureFont, ensureFontsForObjects, getFontDef, overlayFontStack } from '../fonts';
 import { newId } from '../id';
 import { detectUnderline, sampleLineColors, type TextLine, type TextSpan } from '../textExtraction';
 import { createBox, createImage, createLine, createText, reidentify, type BoxKind, type LineKind } from './objectFactory';
@@ -21,6 +21,15 @@ type Draft =
   | { type: 'line'; kind: LineKind; startX: number; startY: number; obj: Line };
 
 const SHAPE_TOOLS_RETURN_TO_SELECT: ReadonlySet<ToolType> = new Set(['rect', 'ellipse', 'line', 'arrow', 'whiteout']);
+
+const isLightPaper = (hex: string) => {
+  const n = hex.replace('#', '');
+  if (n.length < 6) return true;
+  const r = parseInt(n.slice(0, 2), 16);
+  const g = parseInt(n.slice(2, 4), 16);
+  const b = parseInt(n.slice(4, 6), 16);
+  return 0.299 * r + 0.587 * g + 0.114 * b > 210;
+};
 
 /** Stable JSON fingerprint that skips large image payloads. */
 const fingerprint = (objs: SerializedObject[]) =>
@@ -248,7 +257,7 @@ export class PageEditor {
    * Turn an original text line into an editable Textbox: a white-out box
    * hides the printed glyphs and the Textbox re-creates the line with a
    * matching font, size and colour so the page looks unchanged until the
-   * user types.
+   * user types — the same approach as iLovePDF.
    */
   private async editOriginalLine(line: TextLine, e: TPointerEvent) {
     if (this.convertingLine) return;
@@ -260,31 +269,43 @@ export class PageEditor {
         (span) => ({ ...span, text: caps ? span.text.toUpperCase() : span.text }),
       );
       await Promise.all(spans.map((span) => ensureFont(line.fontId, span.bold, span.italic)));
+      if (line.cssFamily) {
+        try {
+          await document.fonts.load(`${Math.max(12, line.fontSize)}px "${line.cssFamily}"`);
+        } catch {
+          /* bundled fallback still works */
+        }
+        cache.clearFontCache(line.cssFamily);
+      }
+      await document.fonts.ready;
       if (this.disposed) return;
       const pdfCanvas = document.querySelector<HTMLCanvasElement>(`[data-page="${this.page.index}"] canvas`);
       const colors = pdfCanvas ? sampleLineColors(pdfCanvas, line, this.page.width) : { ink: '#111111', paper: '#ffffff' };
       const underline = pdfCanvas ? detectUnderline(pdfCanvas, line, this.page.width) : false;
+      const paper = isLightPaper(colors.paper) ? colors.paper : '#ffffff';
 
-      // Font descriptors often under-report ascent/descent; cover at least
-      // 0.95 em above and 0.25 em below the baseline so no glyph fragments
-      // remain, while staying inside normal line leading.
-      const coverTop = Math.min(line.top, line.baseline - line.fontSize * 0.95) - 0.5;
-      const coverBottom = Math.max(line.top + line.height, line.baseline + line.fontSize * 0.25) + 0.5;
+      // Cover every original glyph: pad for side bearings, italic overflow
+      // and anti-aliased edges. Stay inside typical leading so we don't wipe
+      // the line above/below.
+      const padX = Math.max(1.5, line.fontSize * 0.12);
+      const coverTop = Math.min(line.top, line.baseline - line.fontSize * 1.02) - 1;
+      const coverBottom = Math.max(line.top + line.height, line.baseline + line.fontSize * 0.32) + 1;
       const cover = new Rect({
         id: newId(),
         kind: 'whiteout',
         sourceLineId: line.id,
         originX: 'left',
         originY: 'top',
-        left: line.left - 1,
+        left: line.left - padX,
         top: coverTop,
-        width: line.width + 2,
+        width: line.width + padX * 2,
         height: coverBottom - coverTop,
-        fill: colors.paper,
+        fill: paper,
         stroke: null,
         strokeWidth: 0,
         selectable: false,
         evented: false,
+        objectCaching: false,
       });
 
       // Small-caps text uses a real small-caps face when we have one;
@@ -308,37 +329,27 @@ export class PageEditor {
         id: newId(),
         kind: 'text',
         sourceLineId: line.id,
+        sourceOriginalText: text,
         originX: 'left',
         originY: 'top',
         left: line.left,
-        fontFamily: fontStack(line.fontId),
+        fontFamily: overlayFontStack(line.fontId, line.cssFamily),
         fontSize: line.fontSize,
         fontWeight: line.bold ? 700 : 400,
         fontStyle: line.italic ? 'italic' : 'normal',
         fill: colors.ink,
         underline,
         styles: Object.keys(styles).length ? styles : undefined,
-        lineHeight: 1.2,
+        // PDF lines are single-line; extra leading makes the overlay sit off
+        // the original baseline and can cover the next line.
+        lineHeight: 1,
         splitByGrapheme: false,
         editingBorderColor: '#e5322d',
         cursorColor: '#e5322d',
-        width: line.width + 4,
+        width: Math.max(2, line.width),
+        objectCaching: false,
       });
-      // If the substitute font is wider than the original, tighten the
-      // letter-spacing (charSpacing is in 1/1000 em) so the line keeps its
-      // footprint and does not run into neighbouring text. Narrower text is
-      // left at its natural spacing.
-      const natural = tb.calcTextWidth();
-      const gaps = Math.max(1, [...line.text].length - 1);
-      if (natural > line.width * 1.01) {
-        const spacing = ((line.width - natural) / gaps / line.fontSize) * 1000;
-        tb.set({ charSpacing: Math.max(-100, spacing) });
-      }
-      tb.initDimensions();
-      // Give the box room so a few extra characters don't wrap immediately.
-      const roomy = Math.max(tb.calcTextWidth() + line.fontSize, line.width + line.fontSize * 2);
-      tb.set({ width: Math.min(roomy, Math.max(line.width + 4, this.page.width - line.left - 2)) });
-      tb.initDimensions();
+      this.fitOverlayToOriginal(tb, line.width);
       // Place the Textbox so its first baseline sits exactly on the original baseline.
       const internals = tb as unknown as { _fontSizeFraction: number; getHeightOfLineImpl(i: number): number };
       const baselineOffset = internals.getHeightOfLineImpl(0) * (1 - internals._fontSizeFraction);
@@ -348,6 +359,9 @@ export class PageEditor {
       c.add(cover, tb);
       editorStore.getState().setTool('select');
       this.applyFlags(cover);
+      // Source-line whiteouts stay inert so dragging the text doesn't leave
+      // a hole that reveals the original glyphs.
+      cover.set({ selectable: false, evented: false });
       this.applyFlags(tb);
       c.setActiveObject(tb);
       tb.enterEditing(e);
@@ -357,6 +371,24 @@ export class PageEditor {
     } finally {
       this.convertingLine = false;
     }
+  }
+
+  /**
+   * Keep the overlay on the original footprint. Prefer the PDF's own face
+   * (scale ≈ 1). Only squeeze when a substitute font is wider, via scaleX
+   * so the space in "Pankaj Sharma" stays a space.
+   */
+  private fitOverlayToOriginal(tb: Textbox, targetWidth: number) {
+    const width = Math.max(2, targetWidth);
+    // Measure unwrapped. A Textbox whose width is the target will wrap first
+    // and calcTextWidth() then reports the box width, not the real glyph run.
+    tb.set({ charSpacing: 0, scaleX: 1, width: Math.max(width * 4, 800) });
+    tb.initDimensions();
+    const natural = Math.max(2, tb.calcTextWidth());
+    const ratio = width / natural;
+    const sx = Math.abs(ratio - 1) < 0.02 ? 1 : Math.max(0.7, Math.min(1.25, ratio));
+    tb.set({ width: natural, scaleX: sx });
+    tb.initDimensions();
   }
 
   onStyleChanged(style: StyleState) {
@@ -377,9 +409,12 @@ export class PageEditor {
 
   private applyFlags(obj: FabricObject) {
     const t = this.tool;
+    // White-out boxes that hide original PDF glyphs must stay put — dragging
+    // them would uncover the printed text underneath the overlay.
+    const lockCover = obj.kind === 'whiteout' && !!obj.sourceLineId;
     obj.set({
-      selectable: t === 'select',
-      evented: t === 'select' || t === 'eraser' || (t === 'text' && obj.kind === 'text'),
+      selectable: !lockCover && t === 'select',
+      evented: !lockCover && (t === 'select' || t === 'eraser' || (t === 'text' && obj.kind === 'text')),
       hoverCursor: t === 'eraser' ? ERASER_CURSOR : t === 'text' ? 'text' : 'move',
     });
   }
@@ -420,11 +455,32 @@ export class PageEditor {
     });
     c.on('text:editing:entered', () => this.emitSelection());
     c.on('text:editing:exited', ({ target }) => {
+      if (target instanceof Textbox && target.sourceLineId && target.sourceOriginalText !== undefined && target.text === target.sourceOriginalText) {
+        // Clicked but didn't change the words: put the printed PDF glyphs back
+        // so a select-and-deselect cannot restyle the line.
+        const covers = c.getObjects().filter((o) => o.kind === 'whiteout' && o.sourceLineId === target.sourceLineId);
+        c.remove(target, ...covers);
+        this.commit();
+        this.emitSelection();
+        return;
+      }
       if (target && !target.text.trim()) c.remove(target);
       this.commit();
       this.emitSelection();
     });
-    c.on('text:changed', () => this.emitSelection());
+    c.on('text:changed', ({ target }) => {
+      if (target instanceof Textbox && target.sourceLineId) {
+        const fitted = target.calcTextWidth();
+        const sx = target.scaleX || 1;
+        const maxW = Math.max(8, (this.page.width - target.left - 2) / sx);
+        const nextW = Math.min(maxW, Math.max(fitted + 6, target.fontSize * 0.8));
+        if (Math.abs(nextW - target.width) > 0.5) {
+          target.set({ width: nextW });
+          target.initDimensions();
+        }
+      }
+      this.emitSelection();
+    });
 
     const onSelect = () => {
       forEachEditor((e) => e !== this && e.discard());
@@ -608,6 +664,17 @@ export class PageEditor {
     const sx = target.scaleX ?? 1;
     const sy = target.scaleY ?? 1;
     if (Math.abs(sx - 1) < 1e-3 && Math.abs(sy - 1) < 1e-3) return;
+    // Overlays of original PDF lines use scaleX to match the printed width.
+    // Keep that squeeze; only fold a vertical resize into the font size.
+    if (target.sourceLineId) {
+      if (Math.abs(sy - 1) > 1e-3) {
+        target.set({ fontSize: Math.max(4, Math.round(target.fontSize * sy * 10) / 10), scaleY: 1 });
+        target.initDimensions();
+      }
+      target.setCoords();
+      this.canvas.requestRenderAll();
+      return;
+    }
     target.set({
       fontSize: Math.max(4, Math.round(target.fontSize * sy * 10) / 10),
       width: target.width * sx,

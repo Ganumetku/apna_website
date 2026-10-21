@@ -47,6 +47,8 @@ export interface TextLine {
   smallCaps: boolean;
   /** PDF.js internal font name, for debugging. */
   fontName: string;
+  /** Installed CSS family (e.g. "Times New Roman", "Verdana") when we can name it. */
+  cssFamily?: string;
 }
 
 interface FontFlags {
@@ -57,6 +59,7 @@ interface FontFlags {
   descent: number;
   /** Font is a small-caps face (e.g. CMCSC10); we emulate it with uppercase. */
   smallCaps: boolean;
+  cssFamily?: string;
 }
 
 interface Run {
@@ -94,33 +97,54 @@ export function getTextLines(proxy: PDFDocumentProxy, info: PageInfo): Promise<T
   return p;
 }
 
+/**
+ * Max gap (in em) still treated as "the same word/line". A normal space is
+ * ~0.25em; anything much wider is a column (name | roll-number) and must
+ * stay a separate editable box so we don't smash the two together.
+ */
+const JOIN_GAP_EM = 0.55;
+/** Gaps smaller than this are kerning / fake-bold overprint, not a new word. */
+const KERNING_EM = 0.1;
+/** Overlap larger than this with the same string is a duplicate draw. */
+const DUP_OVERLAP_EM = 0.08;
+
 async function extract(proxy: PDFDocumentProxy, info: PageInfo): Promise<{ lines: TextLine[]; complete: boolean }> {
   const page = await proxy.getPage(info.index + 1);
   const content = await page.getTextContent({ includeMarkedContent: false, disableNormalization: false });
   const flagsCache = new Map<string, FontFlags>();
   const runs: Run[] = [];
   let complete = true;
+  const vt = info.viewportTransform;
+  const viewScaleX = Math.hypot(vt[0], vt[1]) || 1;
 
   for (const item of content.items as TextItem[]) {
     if (!('str' in item)) continue;
-    if (!item.str.trim() && !item.hasEOL) continue;
+    // Keep real space runs (word gaps). Drop empty items unless they end a line.
+    if (item.str.length === 0) {
+      if (item.hasEOL && runs.length) runs[runs.length - 1].hasEOL = true;
+      continue;
+    }
     // user space -> display points (applies the page /Rotate and Y flip)
-    const m = Util.transform(info.viewportTransform, item.transform) as Matrix;
+    const m = Util.transform(vt, item.transform) as Matrix;
     const [a, b, c, d, e, f] = m;
     // Only axis-aligned, upright text is editable in place.
     if (Math.abs(b) > 1e-3 || Math.abs(c) > 1e-3 || a <= 0 || d >= 0) continue;
-    const fontSize = Math.hypot(c, d);
+    const fontSize = Math.hypot(c, d) || Math.abs(item.height) * viewScaleX;
     if (fontSize < 1) continue;
     let flags = flagsCache.get(item.fontName);
     if (!flags) {
       if (!page.commonObjs.has(item.fontName)) complete = false;
-      flags = resolveFlags(page, item.fontName, content.styles[item.fontName]?.fontFamily);
+      flags = resolveFlags(page, item.fontName, content.styles[item.fontName]?.fontFamily, content.styles[item.fontName]);
       flagsCache.set(item.fontName, flags);
     }
+    // item.width is in the same space as item.transform (user space). Map it
+    // to display points with the same scale we applied to the origin.
+    const srcScale = Math.hypot(item.transform[0], item.transform[1]) || 1;
+    const displayWidth = item.width * ((Math.hypot(a, b) || viewScaleX) / srcScale);
     runs.push({
       text: item.str,
       x: e,
-      right: e + item.width,
+      right: e + displayWidth,
       baseline: f,
       fontSize,
       fontName: item.fontName,
@@ -129,24 +153,43 @@ async function extract(proxy: PDFDocumentProxy, info: PageInfo): Promise<{ lines
     });
   }
 
-  // Group runs on the same baseline that are close enough into a line.
   runs.sort((p, q) => p.baseline - q.baseline || p.x - q.x);
   const lines: TextLine[] = [];
   let current: Run[] = [];
 
   const flush = () => {
-    if (current.length) lines.push(buildLine(current, info.index, lines.length));
+    const kept = current.filter((r) => r.text.trim().length > 0);
+    if (kept.length) lines.push(buildLine(kept, info.index, lines.length));
     current = [];
   };
 
   for (const run of runs) {
+    const em = run.fontSize;
+    const wideSpace = !run.text.trim() && run.right - run.x > em * JOIN_GAP_EM;
+    // A wide space (tab / column gap) is a line break, not part of the text.
+    if (wideSpace) {
+      flush();
+      continue;
+    }
+
     const last = current[current.length - 1];
     if (last) {
-      const sameBaseline = Math.abs(run.baseline - last.baseline) <= Math.max(last.fontSize, run.fontSize) * 0.3;
+      const sameBaseline = Math.abs(run.baseline - last.baseline) <= Math.max(last.fontSize, run.fontSize) * 0.28;
       const gap = run.x - last.right;
-      const close = gap <= Math.max(last.fontSize, run.fontSize) * 1.2 && gap > -last.fontSize * 0.5;
-      // Bold and italic stay on the same line (a label like "Framework:" next to
-      // regular text). Their difference is kept as spans, not as a line break.
+
+      // Fake-bold / overprint: the same (or contained) string drawn twice,
+      // slightly offset. Keep one copy so we don't concatenate garbage.
+      if (sameBaseline && gap < -em * DUP_OVERLAP_EM) {
+        const aText = last.text.trim();
+        const bText = run.text.trim();
+        if (aText && bText && (aText === bText || aText.includes(bText) || bText.includes(aText))) {
+          last.right = Math.max(last.right, run.right);
+          last.hasEOL = last.hasEOL || run.hasEOL;
+          continue;
+        }
+      }
+
+      const close = gap <= em * JOIN_GAP_EM && gap > -em * 0.35;
       const sameStyle = run.flags.fontId === last.flags.fontId && Math.abs(run.fontSize - last.fontSize) < 0.75;
       if (!(sameBaseline && close && sameStyle) || last.hasEOL) flush();
     }
@@ -160,13 +203,23 @@ function buildLine(runs: Run[], pageIndex: number, n: number): TextLine {
   runs.sort((p, q) => p.x - q.x);
   const raw: TextSpan[] = [];
   let right = -Infinity;
+  let left = Infinity;
   for (const r of runs) {
+    if (!r.text.trim() && raw.length === 0) continue;
     let piece = r.text;
     const prev = raw[raw.length - 1];
-    // Insert a space when the PDF positions a word without one.
-    if (prev && r.x - right > r.fontSize * 0.15 && !/\s$/.test(prev.text) && !/^\s/.test(piece)) piece = ` ${piece}`;
+    const gap = r.x - right;
+    const em = r.fontSize;
+    // Restore missing word spaces from the PDF's positioning. A gap around
+    // one space (~0.25em) becomes one space; bigger (but still same-line)
+    // gaps become a few spaces so names don't run into numbers.
+    if (prev && gap > em * KERNING_EM && !/\s$/.test(prev.text) && !/^\s/.test(piece)) {
+      const spaces = Math.max(1, Math.min(4, Math.round(gap / (em * 0.25))));
+      piece = `${' '.repeat(spaces)}${piece}`;
+    }
     if (prev && prev.bold === r.flags.bold && prev.italic === r.flags.italic) prev.text += piece;
     else raw.push({ text: piece, bold: r.flags.bold, italic: r.flags.italic });
+    left = Math.min(left, r.x);
     right = Math.max(right, r.right);
   }
   const spans = normalizeSpans(raw);
@@ -182,9 +235,9 @@ function buildLine(runs: Run[], pageIndex: number, n: number): TextLine {
     id: `p${pageIndex}-l${n}`,
     text,
     spans,
-    left: first.x,
+    left: Number.isFinite(left) ? left : first.x,
     top,
-    width: right - first.x,
+    width: Math.max(0, right - (Number.isFinite(left) ? left : first.x)),
     height: bottom - top,
     baseline,
     fontSize,
@@ -193,6 +246,7 @@ function buildLine(runs: Run[], pageIndex: number, n: number): TextLine {
     italic,
     smallCaps: first.flags.smallCaps,
     fontName: first.fontName,
+    cssFamily: first.flags.cssFamily,
   };
 }
 
@@ -253,7 +307,12 @@ interface PdfJsFont {
  * derives from the font descriptor (available once the page has rendered)
  * plus the PostScript name as a hint ("CMBX12" = Computer Modern bold, …).
  */
-function resolveFlags(page: PDFPageProxy, fontName: string, fallbackFamily?: string): FontFlags {
+function resolveFlags(
+  page: PDFPageProxy,
+  fontName: string,
+  fallbackFamily?: string,
+  style?: { ascent?: number; descent?: number; fontFamily?: string },
+): FontFlags {
   let font: PdfJsFont | undefined;
   try {
     if (page.commonObjs.has(fontName)) font = page.commonObjs.get(fontName) as PdfJsFont;
@@ -262,7 +321,7 @@ function resolveFlags(page: PDFPageProxy, fontName: string, fallbackFamily?: str
   }
   // Strip the subset tag ("ABCDEF+CMBX12" -> "cmbx12").
   const psName = (font?.name ?? '').replace(/^[A-Z]{6}\+/, '').toLowerCase();
-  const family = (font?.fallbackName ?? fallbackFamily ?? '').toLowerCase();
+  const family = (font?.fallbackName ?? fallbackFamily ?? style?.fontFamily ?? '').toLowerCase();
 
   // LaTeX fonts: Computer Modern (cmr, cmbx, cmti, cmcsc, cmss, cmtt…),
   // Latin Modern (lmroman10-bold, lmsans, lmmono, lmromancaps…), SF (sfrm…).
@@ -284,16 +343,22 @@ function resolveFlags(page: PDFPageProxy, fontName: string, fallbackFamily?: str
 
   // A recognised LaTeX name is authoritative; otherwise fall back to PDF.js' guess.
   const latex = isCM || isLM || isSF;
-  const mono = /mono|courier|consol|typewriter/.test(psName) || /^(cmtt|cmitt|sftt)/.test(psName) || /^lmmono/.test(psName) || (!latex && family.includes('mono'));
+  // Do not use family.includes('mono') — PDF.js labels some sans faces
+  // (Verdana, Tahoma) as the generic "monospace", which would send them
+  // to Roboto Mono and make roll-numbers look grey and wrong.
+  const monoFromName = /mono|courier|consol|typewriter/.test(psName) || /^(cmtt|cmitt|sftt)/.test(psName) || /^lmmono/.test(psName);
+  const sansFromName = /arial|helvetica|verdana|tahoma|geneva|calibri|segoe|trebuchet|candara|corbel|franklin|myriad|univers|frutiger|gill|futura/.test(psName);
+  const serifFromName =
+    /times|georgia|garamond|cambria|book|roman|minion|palatino|century|baskerville|nimbusrom|libertin|charter|utopia|constantia|texgyre(termes|pagella|schola|bonum)/.test(
+      psName,
+    );
+  const mono = monoFromName || (!latex && !sansFromName && !serifFromName && /\bmonospace\b/.test(family));
   const sansLatex = /^(cmss|sfss)/.test(psName) || /^lmsans/.test(psName);
   const serif =
     !mono &&
+    !sansFromName &&
     !sansLatex &&
-    (((isCM || isLM || isSF) && !sansLatex) ||
-      (family.includes('serif') && !family.includes('sans')) ||
-      /times|georgia|garamond|cambria|book|roman|minion|palatino|century|baskerville|nimbusrom|libertin|charter|utopia|texgyre(termes|pagella|schola|bonum)/.test(
-        psName,
-      ));
+    (serifFromName || ((isCM || isLM || isSF) && !sansLatex) || (family.includes('serif') && !family.includes('sans')));
 
   // Computer Modern / Latin Modern roman text gets the real Latin Modern
   // faces (metric-compatible with LaTeX output), including true small caps.
@@ -307,9 +372,32 @@ function resolveFlags(page: PDFPageProxy, fontName: string, fallbackFamily?: str
         : serif
           ? 'noto-serif'
           : 'noto-sans';
-  const ascent = clamp(font?.ascent ?? 0.9, 0.6, 1.2);
-  const descent = clamp(Math.abs(font?.descent ?? 0.22), 0.1, 0.45);
-  return { bold, italic, fontId, ascent, descent, smallCaps };
+  const ascent = clamp(font?.ascent ?? style?.ascent ?? 0.9, 0.6, 1.2);
+  const descent = clamp(Math.abs(font?.descent ?? style?.descent ?? 0.22), 0.1, 0.45);
+  return { bold, italic, fontId, ascent, descent, smallCaps, cssFamily: cssFamilyFromPs(psName) };
+}
+
+/** Map a PostScript name onto an installed CSS family when the OS likely has it. */
+function cssFamilyFromPs(psName: string): string | undefined {
+  if (/times/.test(psName)) return 'Times New Roman';
+  if (/verdana/.test(psName)) return 'Verdana';
+  if (/arial/.test(psName)) return 'Arial';
+  if (/helvetica/.test(psName)) return 'Helvetica';
+  if (/courier/.test(psName)) return 'Courier New';
+  if (/georgia/.test(psName)) return 'Georgia';
+  if (/garamond/.test(psName)) return 'Garamond';
+  if (/palatino|bookantiqua/.test(psName)) return 'Palatino';
+  if (/tahoma/.test(psName)) return 'Tahoma';
+  if (/trebuchet/.test(psName)) return 'Trebuchet MS';
+  if (/calibri/.test(psName)) return 'Calibri';
+  if (/cambria/.test(psName)) return 'Cambria';
+  if (/candara/.test(psName)) return 'Candara';
+  if (/consolas/.test(psName)) return 'Consolas';
+  if (/comic/.test(psName)) return 'Comic Sans MS';
+  if (/impact/.test(psName)) return 'Impact';
+  if (/symbol/.test(psName)) return 'Symbol';
+  if (/wingding/.test(psName)) return 'Wingdings';
+  return undefined;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -330,10 +418,11 @@ export function sampleLineColors(canvas: HTMLCanvasElement, line: TextLine, page
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx || !canvas.width) return fallback;
   const scale = canvas.width / pageWidth;
-  const x = Math.max(0, Math.floor(line.left * scale));
-  const y = Math.max(0, Math.floor(line.top * scale));
-  const w = Math.min(canvas.width - x, Math.ceil(line.width * scale));
-  const h = Math.min(canvas.height - y, Math.ceil(line.height * scale));
+  const pad = Math.max(1, Math.ceil(line.fontSize * 0.08 * scale));
+  const x = Math.max(0, Math.floor(line.left * scale) - pad);
+  const y = Math.max(0, Math.floor(line.top * scale) - pad);
+  const w = Math.min(canvas.width - x, Math.ceil(line.width * scale) + pad * 2);
+  const h = Math.min(canvas.height - y, Math.ceil(line.height * scale) + pad * 2);
   if (w <= 0 || h <= 0) return fallback;
   let data: Uint8ClampedArray;
   try {
@@ -350,7 +439,9 @@ export function sampleLineColors(canvas: HTMLCanvasElement, line: TextLine, page
     const lum = 0.299 * r + 0.587 * g + 0.114 * b;
     // Quantise to 16 levels so anti-aliased pixels vote for the same colour.
     const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
-    const bucket = lum < 150 ? dark : lum > 225 ? light : null;
+    // Ignore mid-greys (anti-aliased glyph edges) so ink stays the true dark
+    // of the printed text instead of a washed-out grey overlay.
+    const bucket = lum < 140 ? dark : lum > 225 ? light : null;
     if (bucket) bucket.set(key, (bucket.get(key) ?? 0) + 1);
   }
   const pick = (m: Map<number, number>, def: string) => {
@@ -368,7 +459,18 @@ export function sampleLineColors(canvas: HTMLCanvasElement, line: TextLine, page
     const b = (key & 15) * 17;
     return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
   };
-  return { ink: pick(dark, fallback.ink), paper: pick(light, fallback.paper) };
+  return { ink: normalizeInk(pick(dark, fallback.ink)), paper: pick(light, fallback.paper) };
+}
+
+/** Body text on a white page is near-black; don't overlay with sampled grey. */
+function normalizeInk(hex: string): string {
+  const n = hex.replace('#', '');
+  if (n.length < 6) return '#111111';
+  const r = parseInt(n.slice(0, 2), 16);
+  const g = parseInt(n.slice(2, 4), 16);
+  const b = parseInt(n.slice(4, 6), 16);
+  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+  return lum > 35 ? '#111111' : hex;
 }
 
 /**

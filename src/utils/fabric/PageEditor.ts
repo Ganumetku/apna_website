@@ -2,9 +2,17 @@ import { ActiveSelection, Canvas, Color, PencilBrush, Rect, Textbox, util } from
 import type { Ellipse, FabricObject, Line, Path, TPointerEvent, TPointerEventInfo } from 'fabric';
 import { EMPTY_OBJECTS, editorStore } from '../../store/editorStore';
 import type { ObjectKind, PageInfo, SerializedObject, StyleState, ToolType } from '../../types';
-import { ensureFont, ensureFontsForObjects, getFontDef, isBold, loadCssFamily, loadPdfFace, overlayFontStack } from '../fonts';
+import {
+  ensureFont,
+  ensureFontsForObjects,
+  getFontDef,
+  isBold,
+  loadOverlayWeightFace,
+  loadPdfFace,
+  overlayFontStack,
+} from '../fonts';
 import { newId } from '../id';
-import { detectUnderline, sampleLineColors, type TextLine, type TextSpan } from '../textExtraction';
+import { detectUnderline, sampleLineColors, sampleLineLooksBold, type TextLine, type TextSpan } from '../textExtraction';
 import { createBox, createImage, createLine, createText, reidentify, type BoxKind, type LineKind } from './objectFactory';
 import { forEachEditor } from './editorRegistry';
 import { applyStyle, readStyle } from './styleMapping';
@@ -233,10 +241,9 @@ export class PageEditor {
     }
     if (!this.hoverRect) {
       this.hoverRect = new Rect({
-        fill: 'rgba(229, 50, 45, 0.06)',
+        fill: 'rgba(229, 50, 45, 0.08)',
         stroke: '#e5322d',
         strokeWidth: 1,
-        strokeDashArray: [4, 3],
         strokeUniform: true,
         originX: 'left',
         originY: 'top',
@@ -247,17 +254,16 @@ export class PageEditor {
       });
       c.add(this.hoverRect);
     }
-    this.hoverRect.set({ left: line.left - 2, top: line.top - 1, width: line.width + 4, height: line.height + 2 });
+    this.hoverRect.set({ left: line.left - 1, top: line.top - 1, width: line.width + 2, height: line.height + 2 });
     this.hoverRect.setCoords();
     c.setCursor('text');
     c.requestRenderAll();
   }
 
   /**
-   * Turn an original text line into an editable Textbox: a white-out box
-   * hides the printed glyphs and the Textbox re-creates the line with a
-   * matching font, size and colour so the page looks unchanged until the
-   * user types — the same approach as iLovePDF.
+   * Click-to-edit like iLovePDF: keep the printed glyphs until the user
+   * actually types. The Textbox is a transparent caret/selection overlay;
+   * white-out + ink paint happen on the first real change.
    */
   private async editOriginalLine(line: TextLine, e: TPointerEvent) {
     if (this.convertingLine) return;
@@ -273,48 +279,23 @@ export class PageEditor {
       const underline = pdfCanvas ? detectUnderline(pdfCanvas, line, this.page.width) : false;
       const paper = isLightPaper(colors.paper) ? '#ffffff' : colors.paper;
       const pdfFamily = line.pdfFamily || line.fontName;
-      // PDF.js registers each embedded face at weight 400 even when the
-      // outlines are bold. Asking Fabric for 700 skips that FontFace (grey /
-      // Times Regular). Keep the native weight so printed glyphs match.
       const pdfFace = !!pdfFamily;
-      const faceBold = pdfFace ? isBold(line.pdfFaceWeight) : line.bold || spans.some((s) => s.bold);
+      const visualBold = line.bold || spans.some((s) => s.bold) || !!(pdfCanvas && sampleLineLooksBold(pdfCanvas, line, this.page.width));
+      const visualItalic = line.italic || spans.some((s) => s.italic);
       await Promise.all(spans.map((span) => ensureFont(line.fontId, span.bold, span.italic)));
       await loadPdfFace(pdfFamily, line.fontSize);
-      if (line.cssFamily) {
-        await Promise.all(spans.map((span) => loadCssFamily(line.cssFamily!, faceBold, span.italic, line.fontSize)));
-      }
+      await loadOverlayWeightFace(line.cssFamily, visualBold, visualItalic, line.fontId);
       await document.fonts.ready;
       if (this.disposed) return;
 
-      // Cover the printed glyphs tightly. A roomy off-white box reads as a
-      // highlight against the rest of the page.
+      const text = spans.map((span) => span.text).join('');
+      // Always paint the PDF FontFace at its registered weight (400). Visual
+      // bold is in the outlines / the weight-400 OS fallback, never CSS 700.
+      const fontWeight = pdfFace ? 'normal' : visualBold ? 'bold' : 'normal';
+      const fontStyle = pdfFace ? 'normal' : visualItalic ? 'italic' : 'normal';
       const padX = Math.max(1, line.fontSize * 0.08);
       const coverTop = line.baseline - line.fontSize * 0.82;
-      const coverBottom = line.baseline + line.fontSize * 0.24;
-      const cover = new Rect({
-        id: newId(),
-        kind: 'whiteout',
-        sourceLineId: line.id,
-        originX: 'left',
-        originY: 'top',
-        left: line.left - padX,
-        top: coverTop,
-        width: line.width + padX * 2,
-        height: coverBottom - coverTop,
-        fill: paper,
-        stroke: null,
-        strokeWidth: 0,
-        selectable: false,
-        evented: false,
-        objectCaching: false,
-      });
-
-      // Small-caps text uses a real small-caps face when we have one;
-      // otherwise the spans above were uppercased. Pin weight on every
-      // character so replacing one letter cannot drop the line to Regular.
-      const text = spans.map((span) => span.text).join('');
-      const fontWeight = faceBold ? 'bold' : 'normal';
-      const fontStyle = !pdfFace && line.italic ? 'italic' : 'normal';
+      const coverHeight = line.baseline + line.fontSize * 0.24 - coverTop;
       const tb = new Textbox(text, {
         id: newId(),
         kind: 'text',
@@ -323,65 +304,146 @@ export class PageEditor {
         sourceFontWeight: fontWeight,
         sourceFontStyle: fontStyle,
         sourcePdfFace: pdfFace,
+        sourceInk: colors.ink,
+        sourcePaper: paper,
+        sourceVisualBold: visualBold,
+        sourceCssFamily: line.cssFamily,
+        sourceCoverDx: -padX,
+        sourceCoverDy: 0,
+        sourceCoverWidth: line.width + padX * 2,
+        sourceCoverHeight: coverHeight,
+        sourcePainted: false,
         originX: 'left',
         originY: 'top',
         left: line.left,
-        fontFamily: overlayFontStack(line.fontId, line.cssFamily, pdfFamily),
+        fontFamily: overlayFontStack(line.fontId, line.cssFamily, pdfFamily, visualBold, visualItalic),
         fontSize: line.fontSize,
         fontWeight,
         fontStyle,
-        fill: colors.ink,
+        fill: 'rgba(0,0,0,0)',
         backgroundColor: '',
         stroke: null,
         strokeWidth: 0,
         underline,
-        // PDF lines are single-line; extra leading makes the overlay sit off
-        // the original baseline and can cover the next line.
         lineHeight: 1,
         splitByGrapheme: false,
+        padding: 0,
+        lockRotation: true,
+        selectionColor: 'rgba(229, 50, 45, 0.22)',
         editingBorderColor: '#e5322d',
         cursorColor: '#e5322d',
         width: Math.max(2, line.width),
         objectCaching: false,
       });
+      this.applySpanStyles(tb, spans, line, visualBold, visualItalic);
       this.fitOverlayToOriginal(tb, line.width);
-      // A few extra points so swapping one letter ("g" → "k") cannot wrap the
-      // last word onto the printed line below.
-      tb.set({ width: tb.width + Math.max(12, line.fontSize) });
+      tb.set({ width: Math.max(tb.width + Math.max(6, line.fontSize * 0.35), line.width + 4) });
       tb.initDimensions();
-      // Place the Textbox so its first baseline sits exactly on the original baseline.
       const internals = tb as unknown as { _fontSizeFraction: number; getHeightOfLineImpl(i: number): number };
       const baselineOffset = internals.getHeightOfLineImpl(0) * (1 - internals._fontSizeFraction);
-      tb.set({ top: line.baseline - baselineOffset });
+      const top = line.baseline - baselineOffset;
+      tb.set({ top, sourceCoverDy: coverTop - top });
 
       const c = this.canvas;
-      c.add(cover, tb);
+      c.add(tb);
       editorStore.getState().setTool('select');
-      this.applyFlags(cover);
-      // Source-line whiteouts stay inert so dragging the text doesn't leave
-      // a hole that reveals the original glyphs.
-      cover.set({ selectable: false, evented: false });
       this.applyFlags(tb);
       c.setActiveObject(tb);
       tb.enterEditing(e);
       tb.hiddenTextarea?.focus();
       c.requestRenderAll();
-      this.commit();
     } finally {
       this.convertingLine = false;
     }
   }
 
+  /** Per-run faces so a bold label next to regular text keeps both. */
+  private applySpanStyles(tb: Textbox, spans: TextSpan[], line: TextLine, visualBold: boolean, visualItalic: boolean) {
+    if (spans.length <= 1) return;
+    const chars: Record<number, Record<string, unknown>> = {};
+    let i = 0;
+    for (const span of spans) {
+      const family = overlayFontStack(
+        line.fontId,
+        span.cssFamily || line.cssFamily,
+        span.pdfFamily || line.pdfFamily,
+        span.bold || visualBold,
+        span.italic || visualItalic,
+      );
+      for (const _ch of span.text) {
+        chars[i] = { fontFamily: family, fontWeight: 'normal', fontStyle: 'normal' };
+        i += 1;
+      }
+    }
+    tb.set('styles', { 0: chars });
+  }
+
+  /** Cover the printed glyphs and paint ink — only after the words change. */
+  private materializeOverlay(tb: Textbox) {
+    if (!tb.sourceLineId || tb.sourcePainted) return;
+    tb.sourcePainted = true;
+    if (!this.coverFor(tb)) {
+      const cover = new Rect({
+        id: newId(),
+        kind: 'whiteout',
+        sourceLineId: tb.sourceLineId,
+        originX: 'left',
+        originY: 'top',
+        left: tb.left + (tb.sourceCoverDx ?? 0),
+        top: tb.top + (tb.sourceCoverDy ?? 0),
+        width: tb.sourceCoverWidth ?? tb.getScaledWidth(),
+        height: tb.sourceCoverHeight ?? tb.fontSize,
+        fill: tb.sourcePaper || '#ffffff',
+        stroke: null,
+        strokeWidth: 0,
+        selectable: false,
+        evented: false,
+        objectCaching: false,
+      });
+      const c = this.canvas;
+      c.add(cover);
+      const tbIndex = c.getObjects().indexOf(tb);
+      while (c.getObjects().indexOf(cover) > tbIndex && tbIndex >= 0) c.sendObjectBackwards(cover);
+    }
+    tb.set({ fill: tb.sourceInk || '#000000', backgroundColor: '', stroke: null, strokeWidth: 0 });
+    this.pinOverlayFace(tb);
+    this.syncCoverToText(tb);
+  }
+
+  private coverFor(tb: Textbox) {
+    return this.canvas.getObjects().find((o) => o.kind === 'whiteout' && o.sourceLineId === tb.sourceLineId) ?? null;
+  }
+
+  private coversForLine(lineId: string) {
+    return this.canvas.getObjects().filter((o) => o.kind === 'whiteout' && o.sourceLineId === lineId);
+  }
+
+  /** Keep the white-out glued under the overlay, and at least as wide as the new words. */
+  private syncCoverToText(tb: Textbox) {
+    const cover = this.coverFor(tb);
+    if (!cover) return;
+    const pad = Math.max(2, tb.fontSize * 0.16);
+    const minW = tb.sourceCoverWidth ?? 0;
+    cover.set({
+      left: tb.left + (tb.sourceCoverDx ?? 0),
+      top: tb.top + (tb.sourceCoverDy ?? 0),
+      width: Math.max(minW, tb.getScaledWidth() + pad),
+      height: tb.sourceCoverHeight ?? cover.height,
+    });
+    cover.setCoords();
+  }
+
   /**
    * Fabric can drop object-level weight when a character is replaced. Put
-   * the printed line's bold/italic back so one keystroke cannot thin the row.
+   * the printed line's face back so one keystroke cannot thin the row.
    */
   private pinOverlayFace(tb: Textbox) {
     if (!tb.sourceLineId || tb.sourceFontWeight == null) return;
-    const fontWeight = isBold(tb.sourceFontWeight) ? 'bold' : 'normal';
+    const fontWeight = tb.sourcePdfFace ? 'normal' : isBold(tb.sourceFontWeight) ? 'bold' : 'normal';
     const fontStyle = tb.sourcePdfFace ? 'normal' : tb.sourceFontStyle === 'italic' ? 'italic' : 'normal';
-    const fill = typeof tb.fill === 'string' && tb.fill ? tb.fill : '#000000';
-    tb.set({ fontWeight, fontStyle, fill, stroke: null, strokeWidth: 0 });
+    const next: Record<string, unknown> = { fontWeight, fontStyle, stroke: null, strokeWidth: 0 };
+    if (tb.sourcePainted) next.fill = tb.sourceInk || (typeof tb.fill === 'string' && tb.fill ? tb.fill : '#000000');
+    tb.set(next);
   }
 
   /**
@@ -391,15 +453,15 @@ export class PageEditor {
    */
   private fitOverlayToOriginal(tb: Textbox, targetWidth: number) {
     const width = Math.max(2, targetWidth);
-    // Measure unwrapped. A Textbox whose width is the target will wrap first
-    // and calcTextWidth() then reports the box width, not the real glyph run.
     tb.set({ charSpacing: 0, scaleX: 1, width: Math.max(width * 4, 800) });
     tb.initDimensions();
     const natural = Math.max(2, tb.calcTextWidth());
     const ratio = width / natural;
-    let sx = Math.abs(ratio - 1) < 0.02 ? 1 : Math.max(0.7, Math.min(1.25, ratio));
-    // Squeezing a bold face thins the stems and the line looks highlighted.
-    if (isBold(tb.fontWeight) && sx < 0.97) sx = 0.97;
+    let sx = 1;
+    if (!tb.sourcePdfFace) {
+      sx = Math.abs(ratio - 1) < 0.02 ? 1 : Math.max(0.7, Math.min(1.25, ratio));
+      if (isBold(tb.fontWeight) && sx < 0.97) sx = 0.97;
+    }
     tb.set({ width: natural, scaleX: sx });
     tb.initDimensions();
   }
@@ -455,8 +517,15 @@ export class PageEditor {
       if (!target) this.setHoveredLine(null);
     });
 
+    c.on('object:moving', ({ target }) => {
+      if (target instanceof Textbox && target.sourceLineId) this.syncCoverToText(target);
+    });
+    c.on('object:scaling', ({ target }) => {
+      if (target instanceof Textbox && target.sourceLineId) this.syncCoverToText(target);
+    });
     c.on('object:modified', ({ target }) => {
       if (target) this.normalizeTextScale(target);
+      if (target instanceof Textbox && target.sourceLineId) this.syncCoverToText(target);
       this.commit();
       this.emitSelection();
     });
@@ -471,16 +540,24 @@ export class PageEditor {
       if (target instanceof Textbox && target.sourceLineId) {
         this.pinOverlayFace(target);
         if (target.sourceOriginalText !== undefined && target.text === target.sourceOriginalText) {
-          // Clicked but didn't change the words: put the printed PDF glyphs back
-          // so a select-and-deselect cannot restyle the line.
-          const covers = c.getObjects().filter((o) => o.kind === 'whiteout' && o.sourceLineId === target.sourceLineId);
-          c.remove(target, ...covers);
+          // Clicked but didn't change the words: drop the caret overlay so
+          // the printed PDF glyphs stay exactly as they were.
+          c.remove(target, ...this.coversForLine(target.sourceLineId));
+          this.emitSelection();
+          return;
+        }
+        this.materializeOverlay(target);
+        this.syncCoverToText(target);
+        if (!target.text.trim()) {
+          c.remove(target);
           this.commit();
           this.emitSelection();
           return;
         }
-        // Drop the red selection fill so the edited line does not look highlighted.
         c.discardActiveObject();
+        this.commit();
+        this.emitSelection();
+        return;
       }
       if (target && !target.text.trim()) c.remove(target);
       this.commit();
@@ -489,18 +566,19 @@ export class PageEditor {
     c.on('text:changed', ({ target }) => {
       if (target instanceof Textbox && target.sourceLineId) {
         this.pinOverlayFace(target);
-        // Measure unwrapped. Never wrap a source line onto the next printed
-        // row; if the new words are wider, grow the box and only squeeze if
-        // we would run off the page.
-        target.set({ width: Math.max(this.page.width * 2, 800) });
+        if (target.sourceOriginalText !== undefined && target.text !== target.sourceOriginalText) {
+          this.materializeOverlay(target);
+        }
+        target.set({ width: Math.max(this.page.width * 2, 800), scaleX: 1 });
         target.initDimensions();
         const fitted = Math.max(target.calcTextWidth() + 8, target.fontSize * 0.8);
         const visualCap = Math.max(8, this.page.width - target.left - 2);
-        let sx = target.scaleX || 1;
-        if (fitted * sx > visualCap) sx = Math.max(0.7, visualCap / fitted);
+        let sx = 1;
+        if (fitted > visualCap) sx = Math.max(0.7, visualCap / fitted);
         target.set({ width: fitted, scaleX: sx });
         target.initDimensions();
         target.setCoords();
+        this.syncCoverToText(target);
       }
       this.emitSelection();
     });
@@ -534,9 +612,15 @@ export class PageEditor {
 
     // Click on a line of the original PDF text (and not on one of our
     // objects): make it editable, iLovePDF-style.
-    if (this.canEditOriginalText() && !opt.target && !c.getActiveObject()) {
+    if (this.canEditOriginalText() && !opt.target) {
       const line = this.lineAt(x, y);
       if (line) {
+        const active = c.getActiveObject();
+        if (active instanceof Textbox && active.isEditing && active.sourceLineId === line.id) return;
+        if (active) {
+          if (active instanceof Textbox && active.isEditing) active.exitEditing();
+          else this.discard();
+        }
         void this.editOriginalLine(line, opt.e);
         return;
       }
@@ -695,6 +779,7 @@ export class PageEditor {
         target.initDimensions();
       }
       target.setCoords();
+      this.syncCoverToText(target);
       this.canvas.requestRenderAll();
       return;
     }
@@ -772,8 +857,12 @@ export class PageEditor {
     if (this.isEditingText()) return false;
     const objs = this.canvas.getActiveObjects();
     if (!objs.length) return false;
+    const extras: FabricObject[] = [];
+    for (const o of objs) {
+      if (o instanceof Textbox && o.sourceLineId) extras.push(...this.coversForLine(o.sourceLineId));
+    }
     this.canvas.discardActiveObject();
-    this.canvas.remove(...objs);
+    this.canvas.remove(...objs, ...extras);
     this.canvas.requestRenderAll();
     this.commit();
     return true;
@@ -812,8 +901,16 @@ export class PageEditor {
     objs.forEach((o) => {
       applyStyle(o, patch);
       if (o instanceof Textbox && o.sourceLineId) {
-        if ('bold' in patch) o.sourceFontWeight = patch.bold ? 'bold' : 'normal';
-        if ('italic' in patch) o.sourceFontStyle = patch.italic ? 'italic' : 'normal';
+        if ('bold' in patch) {
+          o.sourceFontWeight = patch.bold ? 'bold' : 'normal';
+          o.sourceVisualBold = !!patch.bold;
+          o.sourcePdfFace = false;
+        }
+        if ('italic' in patch) {
+          o.sourceFontStyle = patch.italic ? 'italic' : 'normal';
+          o.sourcePdfFace = false;
+        }
+        if ('fontId' in patch) o.sourcePdfFace = false;
       }
     });
     this.canvas.getActiveObject()?.setCoords();

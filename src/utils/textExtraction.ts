@@ -12,13 +12,13 @@ import type { FontId, Matrix, PageInfo } from '../types';
  *   getTextContent() items  ->  transform into display points  ->  group
  *   runs that share a baseline into lines  ->  TextLine (bbox, size, style)
  *
- * When the user clicks a line we cover the original with a white-out box and
- * place a Textbox that uses the PDF's own FontFace (PDF.js `loadedName`) so
- * existing glyphs match the printed page. The subset only has characters the
- * file already used; new letters fall through the CSS stack to Times / Verdana
- * / Noto. Never request CSS bold/italic on that FontFace — the outlines already
- * have the right weight, and asking for 700 makes the browser skip it and look
- * grey.
+ * When the user clicks a line we put a transparent Textbox over it (original
+ * glyphs stay put, like iLovePDF). The first real keystroke covers the printed
+ * run and paints with the PDF's own FontFace (PDF.js `loadedName`). The subset
+ * only has characters the file already used; new letters fall through to a
+ * weight-400 alias of Times/Verdana Bold, then Noto. Never request CSS 700 on
+ * that FontFace — the outlines already have the right weight, and asking for
+ * 700 makes the browser skip it and look grey.
  */
 
 /** A slice of a line that shares one weight and style ("Framework:" bold, the rest regular). */
@@ -26,6 +26,8 @@ export interface TextSpan {
   text: string;
   bold: boolean;
   italic: boolean;
+  pdfFamily?: string;
+  cssFamily?: string;
 }
 
 export interface TextLine {
@@ -200,7 +202,11 @@ async function extract(proxy: PDFDocumentProxy, info: PageInfo): Promise<{ lines
       }
 
       const close = gap <= em * JOIN_GAP_EM && gap > -em * 0.35;
-      const sameStyle = run.flags.fontId === last.flags.fontId && Math.abs(run.fontSize - last.fontSize) < 0.75;
+      const sameStyle =
+        run.flags.pdfFamily === last.flags.pdfFamily &&
+        run.flags.bold === last.flags.bold &&
+        run.flags.italic === last.flags.italic &&
+        Math.abs(run.fontSize - last.fontSize) < 0.75;
       if (!(sameBaseline && close && sameStyle) || last.hasEOL) flush();
     }
     current.push(run);
@@ -228,8 +234,17 @@ function buildLine(runs: Run[], pageIndex: number, n: number): TextLine {
       piece = `${' '.repeat(spaces)}${piece}`;
     }
     const runBold = r.flags.bold || !!r.fakeBold;
-    if (prev && prev.bold === runBold && prev.italic === r.flags.italic) prev.text += piece;
-    else raw.push({ text: piece, bold: runBold, italic: r.flags.italic });
+    if (prev && prev.bold === runBold && prev.italic === r.flags.italic && prev.pdfFamily === r.flags.pdfFamily) {
+      prev.text += piece;
+    } else {
+      raw.push({
+        text: piece,
+        bold: runBold,
+        italic: r.flags.italic,
+        pdfFamily: r.flags.pdfFamily,
+        cssFamily: r.flags.cssFamily,
+      });
+    }
     left = Math.min(left, r.x);
     right = Math.max(right, r.right);
   }
@@ -265,16 +280,16 @@ function buildLine(runs: Run[], pageIndex: number, n: number): TextLine {
 
 /** Collapse whitespace (including across span boundaries) and drop empty spans. */
 function normalizeSpans(spans: TextSpan[]): TextSpan[] {
-  const chars: Array<{ ch: string; bold: boolean; italic: boolean }> = [];
+  const chars: Array<{ ch: string; bold: boolean; italic: boolean; pdfFamily?: string; cssFamily?: string }> = [];
   let prevSpace = true;
   for (const span of spans) {
     for (const ch of span.text) {
       if (/\s/.test(ch)) {
         if (prevSpace) continue;
-        chars.push({ ch: ' ', bold: span.bold, italic: span.italic });
+        chars.push({ ch: ' ', bold: span.bold, italic: span.italic, pdfFamily: span.pdfFamily, cssFamily: span.cssFamily });
         prevSpace = true;
       } else {
-        chars.push({ ch, bold: span.bold, italic: span.italic });
+        chars.push({ ch, bold: span.bold, italic: span.italic, pdfFamily: span.pdfFamily, cssFamily: span.cssFamily });
         prevSpace = false;
       }
     }
@@ -283,8 +298,8 @@ function normalizeSpans(spans: TextSpan[]): TextSpan[] {
   const out: TextSpan[] = [];
   for (const c of chars) {
     const prev = out[out.length - 1];
-    if (prev && prev.bold === c.bold && prev.italic === c.italic) prev.text += c.ch;
-    else out.push({ text: c.ch, bold: c.bold, italic: c.italic });
+    if (prev && prev.bold === c.bold && prev.italic === c.italic && prev.pdfFamily === c.pdfFamily) prev.text += c.ch;
+    else out.push({ text: c.ch, bold: c.bold, italic: c.italic, pdfFamily: c.pdfFamily, cssFamily: c.cssFamily });
   }
   return out;
 }

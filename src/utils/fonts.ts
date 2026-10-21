@@ -144,17 +144,34 @@ export function fontStack(id: FontId): string {
 /**
  * Overlay stack for a PDF line. The PDF.js FontFace (`g_d0_f*`) comes first so
  * glyphs that exist in the subset match the printed page exactly. New letters
- * fall through to the OS face (Times New Roman, Verdana, …) then Noto.
+ * (missing from the subset) fall through to an OS face registered at weight
+ * 400 — Times Bold outlines when the line is bold — then the regular CSS
+ * family, then Noto.
  */
-export function overlayFontStack(id: FontId, cssFamily?: string, pdfFamily?: string): string {
+export function overlayFontStack(
+  id: FontId,
+  cssFamily?: string,
+  pdfFamily?: string,
+  visualBold = false,
+  visualItalic = false,
+): string {
   const fallback = fontStack(id);
   const parts: string[] = [];
   const pdf = pdfFamily?.trim();
   const css = cssFamily?.trim();
+  const alias = css ? overlayWeightAlias(css, visualBold, visualItalic) : undefined;
   if (pdf) parts.push(`"${pdf}"`);
+  if (alias) parts.push(`"${alias}"`);
   if (css && css.toLowerCase() !== pdf?.toLowerCase()) parts.push(`"${css}"`);
   parts.push(fallback);
   return parts.join(', ');
+}
+
+/** CSS family name for a weight/style face registered at 400 so it can sit next to a PDF.js FontFace. */
+export function overlayWeightAlias(cssFamily: string, bold: boolean, italic: boolean): string | undefined {
+  const name = cssFamily.trim();
+  if (!name || (!bold && !italic)) return undefined;
+  return `${name} PDFOverlay ${bold ? 'Bold' : ''}${italic ? 'Italic' : ''}`.replace(/\s+/g, ' ').trim();
 }
 
 /** Wait until PDF.js has registered the page's FontFace. */
@@ -186,6 +203,127 @@ export function loadCssFamily(cssFamily: string, bold: boolean, italic: boolean,
       cache.clearFontCache(name);
     })
     .catch(() => undefined);
+}
+
+const overlayFaceLoads = new Map<string, Promise<void>>();
+
+/**
+ * Register Times/Verdana/… Bold (or Italic) as a weight-400 family. PDF.js
+ * FontFaces live at 400 even when the outlines are bold; new glyphs must
+ * fall through to a bold face at the same CSS weight or the line goes grey.
+ */
+export async function loadOverlayWeightFace(
+  cssFamily: string | undefined,
+  bold: boolean,
+  italic: boolean,
+  fontId: FontId,
+): Promise<void> {
+  const css = cssFamily?.trim();
+  if (!css) return;
+  if (!bold && !italic) {
+    await loadCssFamily(css, false, false);
+    return;
+  }
+  const alias = overlayWeightAlias(css, bold, italic);
+  if (!alias) return;
+  let pending = overlayFaceLoads.get(alias);
+  if (!pending) {
+    pending = (async () => {
+      const locals = localNamesFor(css, bold, italic).map((n) => `local("${n}")`).join(', ');
+      try {
+        const face = new FontFace(alias, locals, { weight: '400', style: 'normal', display: 'block' });
+        document.fonts.add(await face.load());
+        cache.clearFontCache(alias);
+        return;
+      } catch {
+        /* OS face missing — bundle Noto at 400 so replacements stay heavy. */
+      }
+      const def = getFontDef(fontId);
+      const { url } = resolveVariant(def, bold, italic);
+      const face = new FontFace(alias, `url(${url})`, { weight: '400', style: 'normal', display: 'block' });
+      document.fonts.add(await face.load());
+      cache.clearFontCache(alias);
+    })().catch((err) => {
+      overlayFaceLoads.delete(alias);
+      console.warn(`Overlay fallback "${alias}" failed to load`, err);
+    });
+    overlayFaceLoads.set(alias, pending);
+  }
+  await pending;
+}
+
+function localNamesFor(cssFamily: string, bold: boolean, italic: boolean): string[] {
+  const base = cssFamily.trim();
+  const key = base.toLowerCase();
+  const table: Record<string, { bold: string[]; italic: string[]; boldItalic: string[] }> = {
+    'times new roman': {
+      bold: ['Times New Roman Bold', 'TimesNewRomanPS-BoldMT', 'Times-Bold'],
+      italic: ['Times New Roman Italic', 'TimesNewRomanPS-ItalicMT', 'Times-Italic'],
+      boldItalic: ['Times New Roman Bold Italic', 'TimesNewRomanPS-BoldItalicMT', 'Times-BoldItalic'],
+    },
+    verdana: {
+      bold: ['Verdana Bold', 'Verdana-Bold'],
+      italic: ['Verdana Italic', 'Verdana-Italic'],
+      boldItalic: ['Verdana Bold Italic', 'Verdana-BoldItalic'],
+    },
+    arial: {
+      bold: ['Arial Bold', 'Arial-BoldMT'],
+      italic: ['Arial Italic', 'Arial-ItalicMT'],
+      boldItalic: ['Arial Bold Italic', 'Arial-BoldItalicMT'],
+    },
+    helvetica: {
+      bold: ['Helvetica Bold', 'Helvetica-Bold'],
+      italic: ['Helvetica Oblique', 'Helvetica-Oblique'],
+      boldItalic: ['Helvetica Bold Oblique', 'Helvetica-BoldOblique'],
+    },
+    georgia: {
+      bold: ['Georgia Bold', 'Georgia-Bold'],
+      italic: ['Georgia Italic', 'Georgia-Italic'],
+      boldItalic: ['Georgia Bold Italic', 'Georgia-BoldItalic'],
+    },
+    tahoma: {
+      bold: ['Tahoma Bold', 'Tahoma-Bold'],
+      italic: ['Tahoma Italic'],
+      boldItalic: ['Tahoma Bold Italic'],
+    },
+    'courier new': {
+      bold: ['Courier New Bold', 'CourierNewPS-BoldMT'],
+      italic: ['Courier New Italic', 'CourierNewPS-ItalicMT'],
+      boldItalic: ['Courier New Bold Italic', 'CourierNewPS-BoldItalicMT'],
+    },
+    calibri: {
+      bold: ['Calibri Bold', 'Calibri-Bold'],
+      italic: ['Calibri Italic', 'Calibri-Italic'],
+      boldItalic: ['Calibri Bold Italic', 'Calibri-BoldItalic'],
+    },
+    cambria: {
+      bold: ['Cambria Bold', 'Cambria-Bold'],
+      italic: ['Cambria Italic', 'Cambria-Italic'],
+      boldItalic: ['Cambria Bold Italic', 'Cambria-BoldItalic'],
+    },
+    garamond: {
+      bold: ['Garamond Bold'],
+      italic: ['Garamond Italic'],
+      boldItalic: ['Garamond Bold Italic'],
+    },
+    palatino: {
+      bold: ['Palatino Bold', 'Palatino Linotype Bold'],
+      italic: ['Palatino Italic', 'Palatino Linotype Italic'],
+      boldItalic: ['Palatino Bold Italic', 'Palatino Linotype Bold Italic'],
+    },
+    'trebuchet ms': {
+      bold: ['Trebuchet MS Bold', 'TrebuchetMS-Bold'],
+      italic: ['Trebuchet MS Italic', 'TrebuchetMS-Italic'],
+      boldItalic: ['Trebuchet MS Bold Italic', 'TrebuchetMS-BoldItalic'],
+    },
+  };
+  const preset = table[key];
+  const variant = bold && italic ? 'boldItalic' : bold ? 'bold' : 'italic';
+  const names = preset ? [...preset[variant]] : [];
+  if (bold && italic) names.push(`${base} Bold Italic`, `${base}-BoldItalic`);
+  else if (bold) names.push(`${base} Bold`, `${base}-Bold`);
+  else names.push(`${base} Italic`, `${base}-Italic`, `${base} Oblique`);
+  return [...new Set(names)];
 }
 
 /** Inverse of `fontStack`: first bundled family in the CSS stack. */

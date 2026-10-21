@@ -15,6 +15,19 @@ declare module 'fabric' {
     sourceFontStyle?: string;
     /** Overlay is using the PDF's own FontFace; do not fake-bold it. */
     sourcePdfFace?: boolean;
+    /** Sampled ink/paper; applied only after the user actually changes the words. */
+    sourceInk?: string;
+    sourcePaper?: string;
+    /** Printed line is visually bold/italic even when the FontFace is weight 400. */
+    sourceVisualBold?: boolean;
+    sourceCssFamily?: string;
+    /** White-out offset relative to the textbox, so dragging keeps the hole covered. */
+    sourceCoverDx?: number;
+    sourceCoverDy?: number;
+    sourceCoverWidth?: number;
+    sourceCoverHeight?: number;
+    /** True once the original glyphs have been covered and the overlay is painted. */
+    sourcePainted?: boolean;
   }
   interface SerializedObjectProps {
     id?: string;
@@ -24,11 +37,37 @@ declare module 'fabric' {
     sourceFontWeight?: number | string;
     sourceFontStyle?: string;
     sourcePdfFace?: boolean;
+    sourceInk?: string;
+    sourcePaper?: string;
+    sourceVisualBold?: boolean;
+    sourceCssFamily?: string;
+    sourceCoverDx?: number;
+    sourceCoverDy?: number;
+    sourceCoverWidth?: number;
+    sourceCoverHeight?: number;
+    sourcePainted?: boolean;
   }
 }
 
 /** Extra props written by `toObject()` so they survive undo/redo and lazy page mounting. */
-FabricObject.customProperties = ['id', 'kind', 'sourceLineId', 'sourceOriginalText', 'sourceFontWeight', 'sourceFontStyle', 'sourcePdfFace'];
+FabricObject.customProperties = [
+  'id',
+  'kind',
+  'sourceLineId',
+  'sourceOriginalText',
+  'sourceFontWeight',
+  'sourceFontStyle',
+  'sourcePdfFace',
+  'sourceInk',
+  'sourcePaper',
+  'sourceVisualBold',
+  'sourceCssFamily',
+  'sourceCoverDx',
+  'sourceCoverDy',
+  'sourceCoverWidth',
+  'sourceCoverHeight',
+  'sourcePainted',
+];
 
 // Selection handles: brand colours + large touch targets for mobile.
 Object.assign(InteractiveFabricObject.ownDefaults, {

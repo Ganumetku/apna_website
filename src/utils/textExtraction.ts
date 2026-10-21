@@ -13,11 +13,12 @@ import type { FontId, Matrix, PageInfo } from '../types';
  *   runs that share a baseline into lines  ->  TextLine (bbox, size, style)
  *
  * When the user clicks a line we cover the original with a white-out box and
- * place a Textbox with the same text, size, colour and a matching font
- * (serif / sans / mono + bold / italic). Fonts embedded in PDFs are almost
- * always *subsets* (only the glyphs actually used), so they cannot be reused
- * for typing new characters — substituting a full font is what every
- * in-browser editor, including iLovePDF, does.
+ * place a Textbox that uses the PDF's own FontFace (PDF.js `loadedName`) so
+ * existing glyphs match the printed page. The subset only has characters the
+ * file already used; new letters fall through the CSS stack to Times / Verdana
+ * / Noto. Never request CSS bold/italic on that FontFace — the outlines already
+ * have the right weight, and asking for 700 makes the browser skip it and look
+ * grey.
  */
 
 /** A slice of a line that shares one weight and style ("Framework:" bold, the rest regular). */
@@ -47,6 +48,10 @@ export interface TextLine {
   smallCaps: boolean;
   /** PDF.js internal font name, for debugging. */
   fontName: string;
+  /** FontFace family PDF.js registered (usually `g_d0_f1`). Exact printed glyphs. */
+  pdfFamily?: string;
+  /** Weight that FontFace was registered with (usually 400, even for bold outlines). */
+  pdfFaceWeight?: string | number;
   /** Installed CSS family (e.g. "Times New Roman", "Verdana") when we can name it. */
   cssFamily?: string;
 }
@@ -60,6 +65,8 @@ interface FontFlags {
   /** Font is a small-caps face (e.g. CMCSC10); we emulate it with uppercase. */
   smallCaps: boolean;
   cssFamily?: string;
+  pdfFamily?: string;
+  pdfFaceWeight?: string | number;
 }
 
 interface Run {
@@ -71,6 +78,8 @@ interface Run {
   fontName: string;
   flags: FontFlags;
   hasEOL: boolean;
+  /** Same glyphs drawn twice (Word fake-bold). Treat the kept copy as bold. */
+  fakeBold?: boolean;
 }
 
 const cache = new WeakMap<PDFDocumentProxy, Map<number, Promise<TextLine[]>>>();
@@ -185,6 +194,7 @@ async function extract(proxy: PDFDocumentProxy, info: PageInfo): Promise<{ lines
         if (aText && bText && (aText === bText || aText.includes(bText) || bText.includes(aText))) {
           last.right = Math.max(last.right, run.right);
           last.hasEOL = last.hasEOL || run.hasEOL;
+          last.fakeBold = true;
           continue;
         }
       }
@@ -217,8 +227,9 @@ function buildLine(runs: Run[], pageIndex: number, n: number): TextLine {
       const spaces = Math.max(1, Math.min(4, Math.round(gap / (em * 0.25))));
       piece = `${' '.repeat(spaces)}${piece}`;
     }
-    if (prev && prev.bold === r.flags.bold && prev.italic === r.flags.italic) prev.text += piece;
-    else raw.push({ text: piece, bold: r.flags.bold, italic: r.flags.italic });
+    const runBold = r.flags.bold || !!r.fakeBold;
+    if (prev && prev.bold === runBold && prev.italic === r.flags.italic) prev.text += piece;
+    else raw.push({ text: piece, bold: runBold, italic: r.flags.italic });
     left = Math.min(left, r.x);
     right = Math.max(right, r.right);
   }
@@ -247,6 +258,8 @@ function buildLine(runs: Run[], pageIndex: number, n: number): TextLine {
     smallCaps: first.flags.smallCaps,
     fontName: first.fontName,
     cssFamily: first.flags.cssFamily,
+    pdfFamily: first.flags.pdfFamily,
+    pdfFaceWeight: first.flags.pdfFaceWeight,
   };
 }
 
@@ -298,8 +311,10 @@ interface PdfJsFont {
   italic?: boolean;
   black?: boolean;
   fallbackName?: string;
+  loadedName?: string;
   ascent?: number;
   descent?: number;
+  cssFontInfo?: { fontFamily?: string; fontWeight?: string | number; italicAngle?: string };
 }
 
 /**
@@ -329,9 +344,15 @@ function resolveFlags(
   const isLM = /^lm(roman|sans|mono)/.test(psName);
   const isSF = /^sf(rm|bx|ti|sc|ss|tt)/.test(psName);
 
+  const cssWeightRaw = font?.cssFontInfo?.fontWeight;
+  const cssWeight = typeof cssWeightRaw === 'number' ? cssWeightRaw : parseInt(String(cssWeightRaw ?? ''), 10) || 0;
+  const weightHint = /bold|black|heavy|semibold|demibold|extrabold|\bbd\b|boldmt|-bd(?:mt)?\b|-b\b|,b\b/;
   const bold =
     !!(font?.bold || font?.black) ||
-    /bold|black|heavy|semibold|demibold|-b\b|,b\b/.test(psName) ||
+    cssWeight >= 600 ||
+    String(cssWeightRaw ?? '').toLowerCase() === 'bold' ||
+    weightHint.test(psName) ||
+    weightHint.test(family) ||
     /^(cmbx|cmb\d|cmssbx|cmbxti|cmbxsl|sfbx)/.test(psName) ||
     (isLM && /bold|demi/.test(psName));
   const italic =
@@ -374,7 +395,9 @@ function resolveFlags(
           : 'noto-sans';
   const ascent = clamp(font?.ascent ?? style?.ascent ?? 0.9, 0.6, 1.2);
   const descent = clamp(Math.abs(font?.descent ?? style?.descent ?? 0.22), 0.1, 0.45);
-  return { bold, italic, fontId, ascent, descent, smallCaps, cssFamily: cssFamilyFromPs(psName) };
+  const pdfFamily = font?.cssFontInfo?.fontFamily || font?.loadedName || fontName;
+  const pdfFaceWeight = font?.cssFontInfo?.fontWeight ?? 400;
+  return { bold, italic, fontId, ascent, descent, smallCaps, cssFamily: cssFamilyFromPs(psName), pdfFamily, pdfFaceWeight };
 }
 
 /** Map a PostScript name onto an installed CSS family when the OS likely has it. */
@@ -414,7 +437,7 @@ export interface SampledColors {
  * and background colour (PDF.js text content carries no colour info).
  */
 export function sampleLineColors(canvas: HTMLCanvasElement, line: TextLine, pageWidth: number): SampledColors {
-  const fallback = { ink: '#111111', paper: '#ffffff' };
+  const fallback = { ink: '#000000', paper: '#ffffff' };
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx || !canvas.width) return fallback;
   const scale = canvas.width / pageWidth;
@@ -459,18 +482,90 @@ export function sampleLineColors(canvas: HTMLCanvasElement, line: TextLine, page
     const b = (key & 15) * 17;
     return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
   };
-  return { ink: normalizeInk(pick(dark, fallback.ink)), paper: pick(light, fallback.paper) };
+  return { ink: normalizeInk(pick(dark, fallback.ink)), paper: normalizePaper(pick(light, fallback.paper)) };
 }
 
-/** Body text on a white page is near-black; don't overlay with sampled grey. */
+/** Body text on a white page is black; grey ink makes the overlay look highlighted. */
 function normalizeInk(hex: string): string {
   const n = hex.replace('#', '');
-  if (n.length < 6) return '#111111';
+  if (n.length < 6) return '#000000';
   const r = parseInt(n.slice(0, 2), 16);
   const g = parseInt(n.slice(2, 4), 16);
   const b = parseInt(n.slice(4, 6), 16);
   const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-  return lum > 35 ? '#111111' : hex;
+  return lum > 40 ? '#000000' : hex;
+}
+
+/** Glyph anti-alias samples as off-white; a grey white-out looks like a highlight. */
+function normalizePaper(hex: string): string {
+  const n = hex.replace('#', '');
+  if (n.length < 6) return '#ffffff';
+  const r = parseInt(n.slice(0, 2), 16);
+  const g = parseInt(n.slice(2, 4), 16);
+  const b = parseInt(n.slice(4, 6), 16);
+  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+  return lum > 230 ? '#ffffff' : hex;
+}
+
+/**
+ * True when the printed glyphs are visually bold (Times Bold, Word fake-bold,
+ * fill+stroke) even if the font name does not say so. Scans stem width at
+ * x-height; Regular Times is ~0.08em, Bold ~0.14em.
+ */
+export function sampleLineLooksBold(canvas: HTMLCanvasElement, line: TextLine, pageWidth: number): boolean {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx || !canvas.width || line.fontSize < 4) return false;
+  const scale = canvas.width / pageWidth;
+  const em = line.fontSize * scale;
+  if (em < 4) return false;
+  const x = Math.max(0, Math.floor(line.left * scale));
+  const w = Math.min(canvas.width - x, Math.ceil(line.width * scale));
+  if (w < 12) return false;
+  const stems: number[] = [];
+  for (const frac of [0.28, 0.38, 0.48]) {
+    const y = Math.floor((line.baseline - line.fontSize * frac) * scale);
+    if (y < 0 || y >= canvas.height) continue;
+    let data: Uint8ClampedArray;
+    try {
+      data = ctx.getImageData(x, y, w, 1).data;
+    } catch {
+      continue;
+    }
+    let run = 0;
+    for (let col = 0; col < w; col += 1) {
+      const i = col * 4;
+      const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      if (lum < 110) run += 1;
+      else if (run) {
+        stems.push(run);
+        run = 0;
+      }
+    }
+    if (run) stems.push(run);
+  }
+  const stemRuns = stems.filter((s) => s >= 1 && s <= em * 0.32);
+  if (stemRuns.length >= 3) {
+    stemRuns.sort((a, b) => a - b);
+    const median = stemRuns[Math.floor(stemRuns.length / 2)];
+    if (median / em >= 0.095) return true;
+  }
+  // Fallback: bold lines put more ink in the bbox than Regular Times.
+  const y0 = Math.max(0, Math.floor((line.baseline - line.fontSize * 0.7) * scale));
+  const y1 = Math.min(canvas.height, Math.ceil((line.baseline + line.fontSize * 0.05) * scale));
+  const h = y1 - y0;
+  if (h < 2 || w < 12) return false;
+  let data: Uint8ClampedArray;
+  try {
+    data = ctx.getImageData(x, y0, w, h).data;
+  } catch {
+    return false;
+  }
+  let inked = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    if (lum < 140) inked += 1;
+  }
+  return inked / (w * h) >= 0.13;
 }
 
 /**

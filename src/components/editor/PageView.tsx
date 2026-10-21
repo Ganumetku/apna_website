@@ -35,7 +35,9 @@ export const PageView = memo(function PageView({ page, zoom, proxy, scrollRootRe
       className="relative shrink-0 bg-white shadow-[0_1px_3px_rgba(15,23,42,0.12),0_8px_24px_-12px_rgba(15,23,42,0.25)]"
       style={{ width: page.width * zoom, height: page.height * zoom }}
     >
-      {inView && <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 h-full w-full select-none" />}
+      {inView && (
+        <canvas ref={canvasRef} data-pdf-canvas className="pointer-events-none absolute inset-0 h-full w-full select-none" />
+      )}
       {inView && !rendered && !error && (
         <div className="absolute inset-0 flex items-center justify-center">
           <Spinner />

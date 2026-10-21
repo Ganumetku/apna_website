@@ -1,8 +1,8 @@
-import { ActiveSelection, cache, Canvas, Color, PencilBrush, Rect, Textbox, util } from 'fabric';
+import { ActiveSelection, Canvas, Color, PencilBrush, Rect, Textbox, util } from 'fabric';
 import type { Ellipse, FabricObject, Line, Path, TPointerEvent, TPointerEventInfo } from 'fabric';
 import { EMPTY_OBJECTS, editorStore } from '../../store/editorStore';
 import type { ObjectKind, PageInfo, SerializedObject, StyleState, ToolType } from '../../types';
-import { ensureFont, ensureFontsForObjects, getFontDef, overlayFontStack } from '../fonts';
+import { ensureFont, ensureFontsForObjects, getFontDef, isBold, loadCssFamily, loadPdfFace, overlayFontStack } from '../fonts';
 import { newId } from '../id';
 import { detectUnderline, sampleLineColors, type TextLine, type TextSpan } from '../textExtraction';
 import { createBox, createImage, createLine, createText, reidentify, type BoxKind, type LineKind } from './objectFactory';
@@ -268,28 +268,29 @@ export class PageEditor {
       const spans: TextSpan[] = (line.spans.length ? line.spans : [{ text: line.text, bold: line.bold, italic: line.italic }]).map(
         (span) => ({ ...span, text: caps ? span.text.toUpperCase() : span.text }),
       );
+      const pdfCanvas = document.querySelector<HTMLCanvasElement>(`[data-page="${this.page.index}"] canvas[data-pdf-canvas]`);
+      const colors = pdfCanvas ? sampleLineColors(pdfCanvas, line, this.page.width) : { ink: '#000000', paper: '#ffffff' };
+      const underline = pdfCanvas ? detectUnderline(pdfCanvas, line, this.page.width) : false;
+      const paper = isLightPaper(colors.paper) ? '#ffffff' : colors.paper;
+      const pdfFamily = line.pdfFamily || line.fontName;
+      // PDF.js registers each embedded face at weight 400 even when the
+      // outlines are bold. Asking Fabric for 700 skips that FontFace (grey /
+      // Times Regular). Keep the native weight so printed glyphs match.
+      const pdfFace = !!pdfFamily;
+      const faceBold = pdfFace ? isBold(line.pdfFaceWeight) : line.bold || spans.some((s) => s.bold);
       await Promise.all(spans.map((span) => ensureFont(line.fontId, span.bold, span.italic)));
+      await loadPdfFace(pdfFamily, line.fontSize);
       if (line.cssFamily) {
-        try {
-          await document.fonts.load(`${Math.max(12, line.fontSize)}px "${line.cssFamily}"`);
-        } catch {
-          /* bundled fallback still works */
-        }
-        cache.clearFontCache(line.cssFamily);
+        await Promise.all(spans.map((span) => loadCssFamily(line.cssFamily!, faceBold, span.italic, line.fontSize)));
       }
       await document.fonts.ready;
       if (this.disposed) return;
-      const pdfCanvas = document.querySelector<HTMLCanvasElement>(`[data-page="${this.page.index}"] canvas`);
-      const colors = pdfCanvas ? sampleLineColors(pdfCanvas, line, this.page.width) : { ink: '#111111', paper: '#ffffff' };
-      const underline = pdfCanvas ? detectUnderline(pdfCanvas, line, this.page.width) : false;
-      const paper = isLightPaper(colors.paper) ? colors.paper : '#ffffff';
 
-      // Cover every original glyph: pad for side bearings, italic overflow
-      // and anti-aliased edges. Stay inside typical leading so we don't wipe
-      // the line above/below.
-      const padX = Math.max(1.5, line.fontSize * 0.12);
-      const coverTop = Math.min(line.top, line.baseline - line.fontSize * 1.02) - 1;
-      const coverBottom = Math.max(line.top + line.height, line.baseline + line.fontSize * 0.32) + 1;
+      // Cover the printed glyphs tightly. A roomy off-white box reads as a
+      // highlight against the rest of the page.
+      const padX = Math.max(1, line.fontSize * 0.08);
+      const coverTop = line.baseline - line.fontSize * 0.82;
+      const coverBottom = line.baseline + line.fontSize * 0.24;
       const cover = new Rect({
         id: newId(),
         kind: 'whiteout',
@@ -309,37 +310,31 @@ export class PageEditor {
       });
 
       // Small-caps text uses a real small-caps face when we have one;
-      // otherwise the spans above were uppercased. Runs that differ from the
-      // line's main weight (a bold label beside regular text) are per-character.
+      // otherwise the spans above were uppercased. Pin weight on every
+      // character so replacing one letter cannot drop the line to Regular.
       const text = spans.map((span) => span.text).join('');
-      const styles: Record<number, Record<number, { fontWeight?: number; fontStyle?: 'italic' | 'normal' }>> = {};
-      let charIndex = 0;
-      for (const span of spans) {
-        for (const _ch of span.text) {
-          const decl: { fontWeight?: number; fontStyle?: 'italic' | 'normal' } = {};
-          if (span.bold !== line.bold) decl.fontWeight = span.bold ? 700 : 400;
-          if (span.italic !== line.italic) decl.fontStyle = span.italic ? 'italic' : 'normal';
-          if (decl.fontWeight !== undefined || decl.fontStyle !== undefined) {
-            (styles[0] ??= {})[charIndex] = decl;
-          }
-          charIndex += 1;
-        }
-      }
+      const fontWeight = faceBold ? 'bold' : 'normal';
+      const fontStyle = !pdfFace && line.italic ? 'italic' : 'normal';
       const tb = new Textbox(text, {
         id: newId(),
         kind: 'text',
         sourceLineId: line.id,
         sourceOriginalText: text,
+        sourceFontWeight: fontWeight,
+        sourceFontStyle: fontStyle,
+        sourcePdfFace: pdfFace,
         originX: 'left',
         originY: 'top',
         left: line.left,
-        fontFamily: overlayFontStack(line.fontId, line.cssFamily),
+        fontFamily: overlayFontStack(line.fontId, line.cssFamily, pdfFamily),
         fontSize: line.fontSize,
-        fontWeight: line.bold ? 700 : 400,
-        fontStyle: line.italic ? 'italic' : 'normal',
+        fontWeight,
+        fontStyle,
         fill: colors.ink,
+        backgroundColor: '',
+        stroke: null,
+        strokeWidth: 0,
         underline,
-        styles: Object.keys(styles).length ? styles : undefined,
         // PDF lines are single-line; extra leading makes the overlay sit off
         // the original baseline and can cover the next line.
         lineHeight: 1,
@@ -350,6 +345,10 @@ export class PageEditor {
         objectCaching: false,
       });
       this.fitOverlayToOriginal(tb, line.width);
+      // A few extra points so swapping one letter ("g" → "k") cannot wrap the
+      // last word onto the printed line below.
+      tb.set({ width: tb.width + Math.max(12, line.fontSize) });
+      tb.initDimensions();
       // Place the Textbox so its first baseline sits exactly on the original baseline.
       const internals = tb as unknown as { _fontSizeFraction: number; getHeightOfLineImpl(i: number): number };
       const baselineOffset = internals.getHeightOfLineImpl(0) * (1 - internals._fontSizeFraction);
@@ -374,6 +373,18 @@ export class PageEditor {
   }
 
   /**
+   * Fabric can drop object-level weight when a character is replaced. Put
+   * the printed line's bold/italic back so one keystroke cannot thin the row.
+   */
+  private pinOverlayFace(tb: Textbox) {
+    if (!tb.sourceLineId || tb.sourceFontWeight == null) return;
+    const fontWeight = isBold(tb.sourceFontWeight) ? 'bold' : 'normal';
+    const fontStyle = tb.sourcePdfFace ? 'normal' : tb.sourceFontStyle === 'italic' ? 'italic' : 'normal';
+    const fill = typeof tb.fill === 'string' && tb.fill ? tb.fill : '#000000';
+    tb.set({ fontWeight, fontStyle, fill, stroke: null, strokeWidth: 0 });
+  }
+
+  /**
    * Keep the overlay on the original footprint. Prefer the PDF's own face
    * (scale ≈ 1). Only squeeze when a substitute font is wider, via scaleX
    * so the space in "Pankaj Sharma" stays a space.
@@ -386,7 +397,9 @@ export class PageEditor {
     tb.initDimensions();
     const natural = Math.max(2, tb.calcTextWidth());
     const ratio = width / natural;
-    const sx = Math.abs(ratio - 1) < 0.02 ? 1 : Math.max(0.7, Math.min(1.25, ratio));
+    let sx = Math.abs(ratio - 1) < 0.02 ? 1 : Math.max(0.7, Math.min(1.25, ratio));
+    // Squeezing a bold face thins the stems and the line looks highlighted.
+    if (isBold(tb.fontWeight) && sx < 0.97) sx = 0.97;
     tb.set({ width: natural, scaleX: sx });
     tb.initDimensions();
   }
@@ -455,14 +468,19 @@ export class PageEditor {
     });
     c.on('text:editing:entered', () => this.emitSelection());
     c.on('text:editing:exited', ({ target }) => {
-      if (target instanceof Textbox && target.sourceLineId && target.sourceOriginalText !== undefined && target.text === target.sourceOriginalText) {
-        // Clicked but didn't change the words: put the printed PDF glyphs back
-        // so a select-and-deselect cannot restyle the line.
-        const covers = c.getObjects().filter((o) => o.kind === 'whiteout' && o.sourceLineId === target.sourceLineId);
-        c.remove(target, ...covers);
-        this.commit();
-        this.emitSelection();
-        return;
+      if (target instanceof Textbox && target.sourceLineId) {
+        this.pinOverlayFace(target);
+        if (target.sourceOriginalText !== undefined && target.text === target.sourceOriginalText) {
+          // Clicked but didn't change the words: put the printed PDF glyphs back
+          // so a select-and-deselect cannot restyle the line.
+          const covers = c.getObjects().filter((o) => o.kind === 'whiteout' && o.sourceLineId === target.sourceLineId);
+          c.remove(target, ...covers);
+          this.commit();
+          this.emitSelection();
+          return;
+        }
+        // Drop the red selection fill so the edited line does not look highlighted.
+        c.discardActiveObject();
       }
       if (target && !target.text.trim()) c.remove(target);
       this.commit();
@@ -470,14 +488,19 @@ export class PageEditor {
     });
     c.on('text:changed', ({ target }) => {
       if (target instanceof Textbox && target.sourceLineId) {
-        const fitted = target.calcTextWidth();
-        const sx = target.scaleX || 1;
-        const maxW = Math.max(8, (this.page.width - target.left - 2) / sx);
-        const nextW = Math.min(maxW, Math.max(fitted + 6, target.fontSize * 0.8));
-        if (Math.abs(nextW - target.width) > 0.5) {
-          target.set({ width: nextW });
-          target.initDimensions();
-        }
+        this.pinOverlayFace(target);
+        // Measure unwrapped. Never wrap a source line onto the next printed
+        // row; if the new words are wider, grow the box and only squeeze if
+        // we would run off the page.
+        target.set({ width: Math.max(this.page.width * 2, 800) });
+        target.initDimensions();
+        const fitted = Math.max(target.calcTextWidth() + 8, target.fontSize * 0.8);
+        const visualCap = Math.max(8, this.page.width - target.left - 2);
+        let sx = target.scaleX || 1;
+        if (fitted * sx > visualCap) sx = Math.max(0.7, visualCap / fitted);
+        target.set({ width: fitted, scaleX: sx });
+        target.initDimensions();
+        target.setCoords();
       }
       this.emitSelection();
     });
@@ -786,7 +809,13 @@ export class PageEditor {
   applyStyle(patch: Partial<StyleState>) {
     const objs = this.canvas.getActiveObjects();
     if (!objs.length) return;
-    objs.forEach((o) => applyStyle(o, patch));
+    objs.forEach((o) => {
+      applyStyle(o, patch);
+      if (o instanceof Textbox && o.sourceLineId) {
+        if ('bold' in patch) o.sourceFontWeight = patch.bold ? 'bold' : 'normal';
+        if ('italic' in patch) o.sourceFontStyle = patch.italic ? 'italic' : 'normal';
+      }
+    });
     this.canvas.getActiveObject()?.setCoords();
     this.canvas.requestRenderAll();
     this.scheduleCommit();

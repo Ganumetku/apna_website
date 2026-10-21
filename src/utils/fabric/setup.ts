@@ -10,17 +10,25 @@ declare module 'fabric' {
     sourceLineId?: string;
     /** Original PDF line text; if the user doesn't change it we restore the printed glyphs. */
     sourceOriginalText?: string;
+    /** Weight/style of the printed line; typing must not drop them to Regular. */
+    sourceFontWeight?: number | string;
+    sourceFontStyle?: string;
+    /** Overlay is using the PDF's own FontFace; do not fake-bold it. */
+    sourcePdfFace?: boolean;
   }
   interface SerializedObjectProps {
     id?: string;
     kind?: ObjectKind;
     sourceLineId?: string;
     sourceOriginalText?: string;
+    sourceFontWeight?: number | string;
+    sourceFontStyle?: string;
+    sourcePdfFace?: boolean;
   }
 }
 
 /** Extra props written by `toObject()` so they survive undo/redo and lazy page mounting. */
-FabricObject.customProperties = ['id', 'kind', 'sourceLineId', 'sourceOriginalText'];
+FabricObject.customProperties = ['id', 'kind', 'sourceLineId', 'sourceOriginalText', 'sourceFontWeight', 'sourceFontStyle', 'sourcePdfFace'];
 
 // Selection handles: brand colours + large touch targets for mobile.
 Object.assign(InteractiveFabricObject.ownDefaults, {

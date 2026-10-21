@@ -142,15 +142,50 @@ export function fontStack(id: FontId): string {
 }
 
 /**
- * Overlay stack for a PDF line: the OS face that matches the PDF (Times New
- * Roman, Verdana, …) so edited glyphs look like the printed ones, then our
- * bundled family if that face is not installed.
+ * Overlay stack for a PDF line. The PDF.js FontFace (`g_d0_f*`) comes first so
+ * glyphs that exist in the subset match the printed page exactly. New letters
+ * fall through to the OS face (Times New Roman, Verdana, …) then Noto.
  */
-export function overlayFontStack(id: FontId, cssFamily?: string): string {
+export function overlayFontStack(id: FontId, cssFamily?: string, pdfFamily?: string): string {
   const fallback = fontStack(id);
-  const name = cssFamily?.trim();
-  if (!name) return fallback;
-  return `"${name}", ${fallback}`;
+  const parts: string[] = [];
+  const pdf = pdfFamily?.trim();
+  const css = cssFamily?.trim();
+  if (pdf) parts.push(`"${pdf}"`);
+  if (css && css.toLowerCase() !== pdf?.toLowerCase()) parts.push(`"${css}"`);
+  parts.push(fallback);
+  return parts.join(', ');
+}
+
+/** Wait until PDF.js has registered the page's FontFace. */
+export async function loadPdfFace(family: string | undefined, size = 16): Promise<void> {
+  const name = family?.trim();
+  if (!name) return;
+  const px = `${Math.max(12, Math.round(size))}px`;
+  try {
+    await Promise.all([document.fonts.load(`${px} "${name}"`), document.fonts.load(`normal 400 ${px} "${name}"`)]);
+    cache.clearFontCache(name);
+  } catch {
+    /* OS / Noto fallback still works */
+  }
+}
+
+/** Load the OS face at the weight/style the overlay will actually paint. */
+export function loadCssFamily(cssFamily: string, bold: boolean, italic: boolean, size = 16): Promise<void> {
+  const name = cssFamily.trim();
+  if (!name) return Promise.resolve();
+  const weight = bold ? '700' : '400';
+  const style = italic ? 'italic' : 'normal';
+  const px = `${Math.max(12, Math.round(size))}px`;
+  return Promise.all([
+    document.fonts.load(`${style} ${weight} ${px} "${name}"`),
+    document.fonts.load(`${weight} ${px} "${name}"`),
+    document.fonts.load(`${style} ${px} "${name}"`),
+  ])
+    .then(() => {
+      cache.clearFontCache(name);
+    })
+    .catch(() => undefined);
 }
 
 /** Inverse of `fontStack`: first bundled family in the CSS stack. */

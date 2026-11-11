@@ -468,58 +468,248 @@ export function sampleLineColors(canvas: HTMLCanvasElement, line: TextLine, page
   } catch {
     return fallback;
   }
-  const dark = new Map<number, number>();
-  const light = new Map<number, number>();
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-    // Quantise to 16 levels so anti-aliased pixels vote for the same colour.
-    const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
-    // Ignore mid-greys (anti-aliased glyph edges) so ink stays the true dark
-    // of the printed text instead of a washed-out grey overlay.
-    const bucket = lum < 140 ? dark : lum > 225 ? light : null;
-    if (bucket) bucket.set(key, (bucket.get(key) ?? 0) + 1);
-  }
-  const pick = (m: Map<number, number>, def: string) => {
-    let best = -1;
-    let key = -1;
-    m.forEach((count, k) => {
-      if (count > best) {
-        best = count;
-        key = k;
-      }
-    });
-    if (key < 0) return def;
-    const r = ((key >> 8) & 15) * 17;
-    const g = ((key >> 4) & 15) * 17;
-    const b = (key & 15) * 17;
-    return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+
+  // 1. Identify paper (background) color.
+  // Perimeter pixels (outer edges of the padded box) have minimal/no glyph ink
+  // and represent the true background (paper, watermark, table cell, or shading).
+  const paperBins = new Map<number, { count: number; r: number; g: number; b: number }>();
+  const addPaper = (r: number, g: number, b: number, weight: number) => {
+    // 32 levels per channel (5 bits)
+    const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+    let bin = paperBins.get(key);
+    if (!bin) {
+      bin = { count: 0, r: 0, g: 0, b: 0 };
+      paperBins.set(key, bin);
+    }
+    bin.count += weight;
+    bin.r += r * weight;
+    bin.g += g * weight;
+    bin.b += b * weight;
   };
-  return { ink: normalizeInk(pick(dark, fallback.ink)), paper: normalizePaper(pick(light, fallback.paper)) };
+
+  for (let row = 0; row < h; row += 1) {
+    const isPerimRow = row < 2 || row >= h - 2;
+    for (let col = 0; col < w; col += 1) {
+      const idx = (row * w + col) * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const isPerim = isPerimRow || col < 2 || col >= w - 2;
+      addPaper(r, g, b, isPerim ? 4 : 1);
+    }
+  }
+
+  let bestPaper: { count: number; r: number; g: number; b: number } | null = null;
+  for (const bin of paperBins.values()) {
+    if (!bestPaper || bin.count > bestPaper.count) bestPaper = bin;
+  }
+
+  let pr = 255;
+  let pg = 255;
+  let pb = 255;
+  if (bestPaper && bestPaper.count > 0) {
+    pr = Math.round(bestPaper.r / bestPaper.count);
+    pg = Math.round(bestPaper.g / bestPaper.count);
+    pb = Math.round(bestPaper.b / bestPaper.count);
+    // Snap to pure white only if extremely close to pure white (avoid tinting white pages)
+    if (pr >= 252 && pg >= 252 && pb >= 252) {
+      pr = 255;
+      pg = 255;
+      pb = 255;
+    }
+  }
+  const paper = `#${[pr, pg, pb].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+
+  // 2. Identify ink (text) color.
+  // Look for pixels in the box that contrast significantly with the chosen background.
+  const inkBins = new Map<number, { count: number; r: number; g: number; b: number }>();
+  for (let row = 0; row < h; row += 1) {
+    for (let col = 0; col < w; col += 1) {
+      const idx = (row * w + col) * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const distSq = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
+      // Distance threshold excludes subtle paper grain and light watermark transitions
+      if (distSq > 2000) {
+        // Higher contrast pixels get higher weight so dark ink beats faint watermark noise
+        const weight = Math.min(10, Math.max(1, Math.floor(distSq / 1000)));
+        const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+        let bin = inkBins.get(key);
+        if (!bin) {
+          bin = { count: 0, r: 0, g: 0, b: 0 };
+          inkBins.set(key, bin);
+        }
+        bin.count += weight;
+        bin.r += r * weight;
+        bin.g += g * weight;
+        bin.b += b * weight;
+      }
+    }
+  }
+
+  let bestInk: { count: number; r: number; g: number; b: number } | null = null;
+  for (const bin of inkBins.values()) {
+    if (!bestInk || bin.count > bestInk.count) bestInk = bin;
+  }
+
+  let ink = fallback.ink;
+  if (bestInk && bestInk.count > 0) {
+    let ir = Math.round(bestInk.r / bestInk.count);
+    let ig = Math.round(bestInk.g / bestInk.count);
+    let ib = Math.round(bestInk.b / bestInk.count);
+    const lum = 0.299 * ir + 0.587 * ig + 0.114 * ib;
+    // Snap dark neutral ink to clean black
+    if (lum < 40 && Math.max(ir, ig, ib) - Math.min(ir, ig, ib) < 15) {
+      ir = 0;
+      ig = 0;
+      ib = 0;
+    }
+    ink = `#${[ir, ig, ib].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+  }
+
+  return { ink, paper };
 }
 
-/** Body text on a white page is black; grey ink makes the overlay look highlighted. */
-function normalizeInk(hex: string): string {
-  const n = hex.replace('#', '');
-  if (n.length < 6) return '#000000';
-  const r = parseInt(n.slice(0, 2), 16);
-  const g = parseInt(n.slice(2, 4), 16);
-  const b = parseInt(n.slice(4, 6), 16);
-  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-  return lum > 40 ? '#000000' : hex;
-}
+/**
+ * Remove/inpaint original printed glyphs on the underlying PDF canvas so the
+ * watermark, table lines, and background flow seamlessly without any white box.
+ */
+export function healLineOnCanvas(
+  canvas: HTMLCanvasElement,
+  line: { left: number; top?: number; width: number; height?: number; fontSize: number; baseline?: number },
+  pageWidth: number,
+): void {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx || !canvas.width) return;
+  const scale = canvas.width / pageWidth;
+  const padX = Math.max(3, Math.ceil(line.fontSize * 0.2 * scale));
+  const padY = Math.max(3, Math.ceil(line.fontSize * 0.2 * scale));
 
-/** Glyph anti-alias samples as off-white; a grey white-out looks like a highlight. */
-function normalizePaper(hex: string): string {
-  const n = hex.replace('#', '');
-  if (n.length < 6) return '#ffffff';
-  const r = parseInt(n.slice(0, 2), 16);
-  const g = parseInt(n.slice(2, 4), 16);
-  const b = parseInt(n.slice(4, 6), 16);
-  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-  return lum > 230 ? '#ffffff' : hex;
+  const boxTop = line.top !== undefined ? line.top : (line.baseline ?? line.fontSize) - line.fontSize * 0.85;
+  const boxHeight = line.height !== undefined ? line.height : line.fontSize * 1.25;
+
+  const x = Math.max(0, Math.floor(line.left * scale) - padX);
+  const y = Math.max(0, Math.floor(boxTop * scale) - padY);
+  const w = Math.min(canvas.width - x, Math.ceil(line.width * scale) + padX * 2);
+  const h = Math.min(canvas.height - y, Math.ceil(boxHeight * scale) + padY * 2);
+  if (w <= 0 || h <= 0) return;
+
+  let imgData: ImageData;
+  try {
+    imgData = ctx.getImageData(x, y, w, h);
+  } catch {
+    return;
+  }
+  const data = imgData.data;
+
+  // 1. Calculate average background luminance from perimeter pixels
+  let bgLumSum = 0;
+  let bgCount = 0;
+  for (let row = 0; row < h; row += 1) {
+    const isPerimRow = row < 2 || row >= h - 2;
+    for (let col = 0; col < w; col += 1) {
+      if (isPerimRow || col < 2 || col >= w - 2) {
+        const idx = (row * w + col) * 4;
+        const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+        bgLumSum += lum;
+        bgCount += 1;
+      }
+    }
+  }
+  const avgBgLum = bgCount > 0 ? bgLumSum / bgCount : 255;
+
+  // 2. Identify ink pixels that contrast with the background
+  const isInk = new Uint8Array(w * h);
+  for (let row = 0; row < h; row += 1) {
+    for (let col = 0; col < w; col += 1) {
+      const idx = (row * w + col) * 4;
+      const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+      if (avgBgLum > 128) {
+        if (lum < Math.min(200, avgBgLum - 20)) {
+          isInk[row * w + col] = 1;
+        }
+      } else {
+        if (lum > avgBgLum + 20) {
+          isInk[row * w + col] = 1;
+        }
+      }
+    }
+  }
+
+  // 3. Inpaint ink pixels from nearest non-ink neighbors (bidirectional for best watermark continuity)
+  for (let row = 0; row < h; row += 1) {
+    for (let col = 0; col < w; col += 1) {
+      const idx = row * w + col;
+      if (isInk[idx]) {
+        // Horizontal nearest non-ink
+        let lCol = col - 1;
+        while (lCol >= 0 && isInk[row * w + lCol]) lCol -= 1;
+        let rCol = col + 1;
+        while (rCol < w && isInk[row * w + rCol]) rCol += 1;
+        const hasL = lCol >= 0;
+        const hasR = rCol < w;
+        const distH = (hasL ? col - lCol : 999) + (hasR ? rCol - col : 999);
+
+        // Vertical nearest non-ink
+        let tRow = row - 1;
+        while (tRow >= 0 && isInk[tRow * w + col]) tRow -= 1;
+        let bRow = row + 1;
+        while (bRow < h && isInk[bRow * w + col]) bRow += 1;
+        const hasT = tRow >= 0;
+        const hasB = bRow < h;
+        const distV = (hasT ? row - tRow : 999) + (hasB ? bRow - row : 999);
+
+        const pIdx = idx * 4;
+
+        if (distV < distH && (hasT || hasB)) {
+          if (hasT && hasB) {
+            const dT = row - tRow;
+            const dB = bRow - row;
+            const total = dT + dB;
+            const tIdx = (tRow * w + col) * 4;
+            const bIdx = (bRow * w + col) * 4;
+            data[pIdx] = Math.round((data[tIdx] * dB + data[bIdx] * dT) / total);
+            data[pIdx + 1] = Math.round((data[tIdx + 1] * dB + data[bIdx + 1] * dT) / total);
+            data[pIdx + 2] = Math.round((data[tIdx + 2] * dB + data[bIdx + 2] * dT) / total);
+          } else if (hasT) {
+            const tIdx = (tRow * w + col) * 4;
+            data[pIdx] = data[tIdx];
+            data[pIdx + 1] = data[tIdx + 1];
+            data[pIdx + 2] = data[tIdx + 2];
+          } else if (hasB) {
+            const bIdx = (bRow * w + col) * 4;
+            data[pIdx] = data[bIdx];
+            data[pIdx + 1] = data[bIdx + 1];
+            data[pIdx + 2] = data[bIdx + 2];
+          }
+        } else if (hasL || hasR) {
+          if (hasL && hasR) {
+            const dL = col - lCol;
+            const dR = rCol - col;
+            const total = dL + dR;
+            const lIdx = (row * w + lCol) * 4;
+            const rIdx = (row * w + rCol) * 4;
+            data[pIdx] = Math.round((data[lIdx] * dR + data[rIdx] * dL) / total);
+            data[pIdx + 1] = Math.round((data[lIdx + 1] * dR + data[rIdx + 1] * dL) / total);
+            data[pIdx + 2] = Math.round((data[lIdx + 2] * dR + data[rIdx + 2] * dL) / total);
+          } else if (hasL) {
+            const lIdx = (row * w + lCol) * 4;
+            data[pIdx] = data[lIdx];
+            data[pIdx + 1] = data[lIdx + 1];
+            data[pIdx + 2] = data[lIdx + 2];
+          } else if (hasR) {
+            const rIdx = (row * w + rCol) * 4;
+            data[pIdx] = data[rIdx];
+            data[pIdx + 1] = data[rIdx + 1];
+            data[pIdx + 2] = data[rIdx + 2];
+          }
+        }
+      }
+    }
+  }
+
+  ctx.putImageData(imgData, x, y);
 }
 
 /**

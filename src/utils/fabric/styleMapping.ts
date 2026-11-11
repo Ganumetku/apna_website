@@ -5,7 +5,7 @@ import { fontDefFromStack, fontStack, isBold } from '../fonts';
 
 /** Which properties-panel fields apply to each object kind. */
 export const FIELDS_BY_KIND: Record<ObjectKind, StyleKey[]> = {
-  text: ['fontId', 'fontSize', 'bold', 'italic', 'textAlign', 'textColor', 'opacity'],
+  text: ['fontId', 'fontSize', 'bold', 'italic', 'textAlign', 'textColor', 'fillColor', 'opacity'],
   rect: ['fillColor', 'strokeColor', 'strokeWidth', 'opacity'],
   ellipse: ['fillColor', 'strokeColor', 'strokeWidth', 'opacity'],
   line: ['strokeColor', 'strokeWidth', 'opacity'],
@@ -64,6 +64,14 @@ export function readStyle(obj: FabricObject): Partial<StyleState> {
   switch (obj.kind) {
     case 'text': {
       const t = obj as Textbox;
+      let bg: string | null = null;
+      if (t.sourceLineId) {
+        if (t.sourcePaper && t.sourcePaper !== 'transparent' && t.sourcePaper !== 'none') {
+          bg = toHex(t.sourcePaper);
+        }
+      } else if (t.backgroundColor && t.backgroundColor !== 'transparent' && t.backgroundColor !== 'none') {
+        bg = toHex(t.backgroundColor);
+      }
       return {
         fontId: fontDefFromStack(t.fontFamily).id,
         fontSize: Math.round(t.fontSize * (t.scaleY ?? 1) * 10) / 10,
@@ -71,6 +79,7 @@ export function readStyle(obj: FabricObject): Partial<StyleState> {
         italic: t.fontStyle === 'italic',
         textAlign: (['left', 'center', 'right'].includes(t.textAlign) ? t.textAlign : 'left') as TextAlign,
         textColor: toHex(t.fill),
+        fillColor: bg,
         opacity,
       };
     }
@@ -111,6 +120,9 @@ export function applyStyle(obj: FabricObject, patch: Partial<StyleState>): void 
   if (kind === 'text') {
     const t = obj as Textbox;
     if (has('textColor')) props.fill = patch.textColor;
+    if (has('fillColor')) {
+      props.backgroundColor = patch.fillColor && patch.fillColor !== 'transparent' && patch.fillColor !== 'none' ? patch.fillColor : '';
+    }
     if (has('fontId') && patch.fontId) props.fontFamily = fontStack(patch.fontId);
     if (has('bold')) props.fontWeight = patch.bold ? 700 : 400;
     if (has('italic')) props.fontStyle = patch.italic ? 'italic' : 'normal';

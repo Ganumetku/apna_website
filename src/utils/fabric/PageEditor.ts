@@ -12,7 +12,7 @@ import {
   overlayFontStack,
 } from '../fonts';
 import { newId } from '../id';
-import { detectUnderline, sampleLineColors, sampleLineLooksBold, type TextLine, type TextSpan } from '../textExtraction';
+import { detectUnderline, healLineOnCanvas, sampleLineColors, sampleLineLooksBold, type TextLine, type TextSpan } from '../textExtraction';
 import { createBox, createImage, createLine, createText, reidentify, type BoxKind, type LineKind } from './objectFactory';
 import { forEachEditor } from './editorRegistry';
 import { applyStyle, readStyle } from './styleMapping';
@@ -29,15 +29,6 @@ type Draft =
   | { type: 'line'; kind: LineKind; startX: number; startY: number; obj: Line };
 
 const SHAPE_TOOLS_RETURN_TO_SELECT: ReadonlySet<ToolType> = new Set(['rect', 'ellipse', 'line', 'arrow', 'whiteout']);
-
-const isLightPaper = (hex: string) => {
-  const n = hex.replace('#', '');
-  if (n.length < 6) return true;
-  const r = parseInt(n.slice(0, 2), 16);
-  const g = parseInt(n.slice(2, 4), 16);
-  const b = parseInt(n.slice(4, 6), 16);
-  return 0.299 * r + 0.587 * g + 0.114 * b > 210;
-};
 
 /** Stable JSON fingerprint that skips large image payloads. */
 const fingerprint = (objs: SerializedObject[]) =>
@@ -144,6 +135,7 @@ export class PageEditor {
         this.applyFlags(obj);
         this.canvas.add(obj);
       }
+      this.healAllEditedLines();
       this.canvas.requestRenderAll();
     } finally {
       if (token === this.loadToken) this.loading = false;
@@ -206,6 +198,32 @@ export class PageEditor {
 
   setTextLines(lines: TextLine[]) {
     this.textLines = lines;
+    this.healAllEditedLines();
+  }
+
+  getTextLines(): readonly TextLine[] {
+    return this.textLines;
+  }
+
+  healAllEditedLines(targetCanvas?: HTMLCanvasElement) {
+    const pdfCanvas = targetCanvas || document.querySelector<HTMLCanvasElement>(`[data-page="${this.page.index}"] canvas[data-pdf-canvas]`);
+    if (!pdfCanvas) return;
+    for (const obj of this.canvas.getObjects()) {
+      if (obj instanceof Textbox && obj.sourceLineId) {
+        const isEdited = obj.sourcePainted || (obj.sourceOriginalText !== undefined && obj.text !== obj.sourceOriginalText);
+        if (!isEdited) continue;
+        const line = this.textLines.find((l) => l.id === obj.sourceLineId);
+        const lineInfo = line || {
+          left: obj.sourceLineLeft ?? obj.left,
+          top: obj.sourceLineTop ?? obj.top,
+          width: obj.sourceLineWidth ?? (obj.sourceCoverWidth ?? obj.getScaledWidth()),
+          height: obj.sourceLineHeight ?? obj.getScaledHeight(),
+          fontSize: obj.fontSize,
+          baseline: obj.sourceBaseline,
+        };
+        healLineOnCanvas(pdfCanvas, lineInfo, this.page.width);
+      }
+    }
   }
 
   private canEditOriginalText() {
@@ -277,7 +295,6 @@ export class PageEditor {
       const pdfCanvas = document.querySelector<HTMLCanvasElement>(`[data-page="${this.page.index}"] canvas[data-pdf-canvas]`);
       const colors = pdfCanvas ? sampleLineColors(pdfCanvas, line, this.page.width) : { ink: '#000000', paper: '#ffffff' };
       const underline = pdfCanvas ? detectUnderline(pdfCanvas, line, this.page.width) : false;
-      const paper = isLightPaper(colors.paper) ? '#ffffff' : colors.paper;
       const pdfFamily = line.pdfFamily || line.fontName;
       const pdfFace = !!pdfFamily;
       const visualBold = line.bold || spans.some((s) => s.bold) || !!(pdfCanvas && sampleLineLooksBold(pdfCanvas, line, this.page.width));
@@ -305,13 +322,18 @@ export class PageEditor {
         sourceFontStyle: fontStyle,
         sourcePdfFace: pdfFace,
         sourceInk: colors.ink,
-        sourcePaper: paper,
+        sourcePaper: 'transparent',
         sourceVisualBold: visualBold,
         sourceCssFamily: line.cssFamily,
         sourceCoverDx: -padX,
         sourceCoverDy: 0,
         sourceCoverWidth: line.width + padX * 2,
         sourceCoverHeight: coverHeight,
+        sourceLineLeft: line.left,
+        sourceLineTop: line.top,
+        sourceLineWidth: line.width,
+        sourceLineHeight: line.height,
+        sourceBaseline: line.baseline,
         sourcePainted: false,
         originX: 'left',
         originY: 'top',
@@ -378,33 +400,59 @@ export class PageEditor {
     tb.set('styles', { 0: chars });
   }
 
-  /** Cover the printed glyphs and paint ink — only after the words change. */
+  /** Heal the original printed glyphs on the canvas and paint ink — only after the words change. */
   private materializeOverlay(tb: Textbox) {
     if (!tb.sourceLineId || tb.sourcePainted) return;
     tb.sourcePainted = true;
-    if (!this.coverFor(tb)) {
-      const cover = new Rect({
-        id: newId(),
-        kind: 'whiteout',
-        sourceLineId: tb.sourceLineId,
-        originX: 'left',
-        originY: 'top',
-        left: tb.left + (tb.sourceCoverDx ?? 0),
-        top: tb.top + (tb.sourceCoverDy ?? 0),
-        width: tb.sourceCoverWidth ?? tb.getScaledWidth(),
-        height: tb.sourceCoverHeight ?? tb.fontSize,
-        fill: tb.sourcePaper || '#ffffff',
-        stroke: null,
-        strokeWidth: 0,
-        selectable: false,
-        evented: false,
-        objectCaching: false,
-      });
-      const c = this.canvas;
-      c.add(cover);
-      const tbIndex = c.getObjects().indexOf(tb);
-      while (c.getObjects().indexOf(cover) > tbIndex && tbIndex >= 0) c.sendObjectBackwards(cover);
+
+    // Heal the original text glyphs on the underlying PDF canvas so the watermark
+    // and document background flow continuously with zero white container!
+    const pdfCanvas = document.querySelector<HTMLCanvasElement>(`[data-page="${this.page.index}"] canvas[data-pdf-canvas]`);
+    if (pdfCanvas) {
+      const line = this.textLines.find((l) => l.id === tb.sourceLineId);
+      const lineInfo = line || {
+        left: tb.sourceLineLeft ?? tb.left,
+        top: tb.sourceLineTop ?? tb.top,
+        width: tb.sourceLineWidth ?? (tb.sourceCoverWidth ?? tb.getScaledWidth()),
+        height: tb.sourceLineHeight ?? tb.getScaledHeight(),
+        fontSize: tb.fontSize,
+        baseline: tb.sourceBaseline,
+      };
+      healLineOnCanvas(pdfCanvas, lineInfo, this.page.width);
     }
+
+    // Only create a cover if the user explicitly configured a solid background color
+    if (tb.sourcePaper && tb.sourcePaper !== 'transparent' && tb.sourcePaper !== 'none') {
+      if (!this.coverFor(tb)) {
+        const cover = new Rect({
+          id: newId(),
+          kind: 'whiteout',
+          sourceLineId: tb.sourceLineId,
+          originX: 'left',
+          originY: 'top',
+          left: tb.left + (tb.sourceCoverDx ?? 0),
+          top: tb.top + (tb.sourceCoverDy ?? 0),
+          width: tb.sourceCoverWidth ?? tb.getScaledWidth(),
+          height: tb.sourceCoverHeight ?? tb.fontSize,
+          fill: tb.sourcePaper,
+          stroke: null,
+          strokeWidth: 0,
+          selectable: false,
+          evented: false,
+          objectCaching: false,
+        });
+        const c = this.canvas;
+        c.add(cover);
+        const tbIndex = c.getObjects().indexOf(tb);
+        while (c.getObjects().indexOf(cover) > tbIndex && tbIndex >= 0) c.sendObjectBackwards(cover);
+      }
+    } else {
+      const existing = this.coversForLine(tb.sourceLineId);
+      if (existing.length) {
+        this.canvas.remove(...existing);
+      }
+    }
+
     tb.set({ fill: tb.sourceInk || '#000000', backgroundColor: '', stroke: null, strokeWidth: 0 });
     this.pinOverlayFace(tb);
     this.syncCoverToText(tb);
@@ -549,7 +597,8 @@ export class PageEditor {
         this.materializeOverlay(target);
         this.syncCoverToText(target);
         if (!target.text.trim()) {
-          c.remove(target);
+          target.set({ text: '', visible: false, selectable: false, evented: false });
+          c.discardActiveObject();
           this.commit();
           this.emitSelection();
           return;
@@ -857,12 +906,17 @@ export class PageEditor {
     if (this.isEditingText()) return false;
     const objs = this.canvas.getActiveObjects();
     if (!objs.length) return false;
-    const extras: FabricObject[] = [];
+    const toRemove: FabricObject[] = [];
     for (const o of objs) {
-      if (o instanceof Textbox && o.sourceLineId) extras.push(...this.coversForLine(o.sourceLineId));
+      if (o instanceof Textbox && o.sourceLineId) {
+        o.set({ text: '', visible: false, selectable: false, evented: false });
+      } else {
+        toRemove.push(o);
+        if (o.kind === 'whiteout' && o.sourceLineId) toRemove.push(o);
+      }
     }
     this.canvas.discardActiveObject();
-    this.canvas.remove(...objs, ...extras);
+    if (toRemove.length) this.canvas.remove(...toRemove);
     this.canvas.requestRenderAll();
     this.commit();
     return true;
@@ -911,6 +965,29 @@ export class PageEditor {
           o.sourcePdfFace = false;
         }
         if ('fontId' in patch) o.sourcePdfFace = false;
+        if ('fillColor' in patch) {
+          const color = patch.fillColor;
+          const isTransparent = !color || color === 'transparent' || color === 'none';
+          o.sourcePaper = isTransparent ? 'transparent' : color;
+          const covers = this.coversForLine(o.sourceLineId);
+          if (covers.length) {
+            covers.forEach((c) => {
+              c.set({
+                fill: isTransparent ? '' : color,
+                opacity: isTransparent ? 0 : 1,
+                visible: !isTransparent,
+              });
+              c.setCoords();
+            });
+          } else if (!isTransparent) {
+            this.materializeOverlay(o);
+            const cov = this.coverFor(o);
+            if (cov) {
+              cov.set({ fill: color, opacity: 1, visible: true });
+              cov.setCoords();
+            }
+          }
+        }
       }
     });
     this.canvas.getActiveObject()?.setCoords();

@@ -10,6 +10,7 @@ import {
   Copy,
   Italic,
   Minus,
+  Pipette,
   Plus,
   Trash2,
   X,
@@ -150,7 +151,7 @@ export function PropertiesPanel() {
         <Field label="Cover color">
           <ColorPicker
             value={values.whiteoutColor}
-            swatches={['#ffffff', '#f8fafc', '#fefce8', '#f5f5f4', '#000000']}
+            swatches={['#ffffff', '#e0e0e0', '#f8fafc', '#f1f5f9', '#fefce8', '#f5f5f4', '#000000']}
             onChange={(c) => c && set({ whiteoutColor: c })}
           />
         </Field>
@@ -161,8 +162,13 @@ export function PropertiesPanel() {
         </Field>
       )}
       {has('fillColor') && (
-        <Field label="Fill">
-          <ColorPicker value={values.fillColor} allowNone onChange={(c) => set({ fillColor: c })} />
+        <Field label={kinds.some((k) => k === 'text') ? 'Background / Container' : 'Fill'}>
+          <ColorPicker
+            value={values.fillColor}
+            allowNone
+            swatches={['#ffffff', '#e0e0e0', '#f8fafc', '#f1f5f9', '#fefce8', '#f5f5f4', '#000000']}
+            onChange={(c) => set({ fillColor: c })}
+          />
         </Field>
       )}
       {has('strokeWidth') && (
@@ -259,42 +265,70 @@ function ColorPicker({
   swatches?: string[];
 }) {
   const current = value?.toLowerCase() ?? null;
+  const hasEyeDropper = typeof window !== 'undefined' && 'EyeDropper' in window;
+  const pickWithEyeDropper = async () => {
+    try {
+      const eyeDropper = new (window as unknown as { EyeDropper: { new (): { open(): Promise<{ sRGBHex: string }> } } }).EyeDropper();
+      const result = await eyeDropper.open();
+      if (result?.sRGBHex) {
+        onChange(result.sRGBHex.toLowerCase());
+      }
+    } catch {
+      // User cancelled
+    }
+  };
+
+  const allSwatches = current && !swatches.map((s) => s.toLowerCase()).includes(current)
+    ? [current, ...swatches]
+    : swatches;
+
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       {allowNone && (
         <button
           type="button"
-          title="No fill"
-          aria-label="No fill"
+          title="No fill (transparent)"
+          aria-label="No fill (transparent)"
           onClick={() => onChange(null)}
           className={clsx(
-            'flex h-7 w-7 items-center justify-center rounded-full bg-white text-slate-400 ring-1 ring-slate-300',
+            'flex h-7 w-7 items-center justify-center rounded-full bg-white text-slate-400 ring-1 ring-slate-300 hover:bg-slate-50',
             current === null && 'ring-2 ring-brand-500 ring-offset-1',
           )}
         >
           <Ban className="h-4 w-4" />
         </button>
       )}
-      {swatches.map((c) => (
+      {allSwatches.map((c) => (
         <button
           key={c}
           type="button"
           title={c}
           aria-label={`Color ${c}`}
           onClick={() => onChange(c)}
-          className={clsx('h-7 w-7 rounded-full ring-1 ring-slate-900/15', current === c && 'ring-2 ring-brand-500 ring-offset-1')}
+          className={clsx('h-7 w-7 rounded-full ring-1 ring-slate-900/15 transition hover:scale-105', current === c.toLowerCase() && 'ring-2 ring-brand-500 ring-offset-1')}
           style={{ background: c }}
         />
       ))}
+      {hasEyeDropper && (
+        <button
+          type="button"
+          title="Pick color from page (eyedropper)"
+          aria-label="Pick color from page"
+          onClick={pickWithEyeDropper}
+          className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-slate-600 ring-1 ring-slate-300 hover:bg-slate-50 hover:text-brand-600 transition hover:scale-105"
+        >
+          <Pipette className="h-3.5 w-3.5" />
+        </button>
+      )}
       <label
-        className="relative h-7 w-7 cursor-pointer overflow-hidden rounded-full ring-1 ring-slate-900/15"
+        className="relative h-7 w-7 cursor-pointer overflow-hidden rounded-full ring-1 ring-slate-900/15 transition hover:scale-105"
         title="Custom color"
         style={{ background: 'conic-gradient(red, yellow, lime, aqua, blue, magenta, red)' }}
       >
         <input
           type="color"
           value={current ?? '#ffffff'}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => onChange(e.target.value.toLowerCase())}
           className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
           aria-label="Custom color"
         />

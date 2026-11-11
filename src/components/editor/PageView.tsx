@@ -26,7 +26,7 @@ export const PageView = memo(function PageView({ page, zoom, proxy, scrollRootRe
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const inView = useInView(wrapRef, scrollRootRef, '800px 0px');
-  const { rendered, error } = usePdfPageRender(canvasRef, proxy, page.index, zoom, inView);
+  const { rendered, error, renderCount } = usePdfPageRender(canvasRef, proxy, page.index, zoom, inView);
 
   return (
     <div
@@ -44,7 +44,7 @@ export const PageView = memo(function PageView({ page, zoom, proxy, scrollRootRe
         </div>
       )}
       {error && <div className="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-red-600">{error}</div>}
-      {inView && <FabricLayer page={page} zoom={zoom} proxy={proxy} rendered={rendered} />}
+      {inView && <FabricLayer page={page} zoom={zoom} proxy={proxy} rendered={rendered} renderCount={renderCount} />}
       <span className="pointer-events-none absolute -bottom-0 left-1/2 hidden -translate-x-1/2 translate-y-full pt-0.5 text-[11px] font-medium text-slate-400 sm:block">
         {page.index + 1}
       </span>
@@ -53,7 +53,19 @@ export const PageView = memo(function PageView({ page, zoom, proxy, scrollRootRe
 });
 
 /** Hosts the page's PageEditor and keeps it in sync with the store. */
-function FabricLayer({ page, zoom, proxy, rendered }: { page: PageInfo; zoom: number; proxy: PDFDocumentProxy; rendered: boolean }) {
+function FabricLayer({
+  page,
+  zoom,
+  proxy,
+  rendered,
+  renderCount,
+}: {
+  page: PageInfo;
+  zoom: number;
+  proxy: PDFDocumentProxy;
+  rendered: boolean;
+  renderCount: number;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<PageEditor | null>(null);
   const initialZoom = useRef(zoom);
@@ -90,6 +102,12 @@ function FabricLayer({ page, zoom, proxy, rendered }: { page: PageInfo; zoom: nu
   useEffect(() => {
     editorRef.current?.setZoom(zoom);
   }, [zoom]);
+
+  // Re-heal edited original text lines whenever the PDF page bitmap is re-rendered (e.g. on zoom)
+  useEffect(() => {
+    if (!rendered) return;
+    editorRef.current?.healAllEditedLines();
+  }, [renderCount, rendered]);
 
   // Once the bitmap is rendered (fonts resolved), make the original text editable.
   useEffect(() => {

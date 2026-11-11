@@ -1,5 +1,6 @@
 import { useEffect, useState, type RefObject } from 'react';
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
+import { healCanvasForPage } from '../utils/healCanvas';
 
 const MAX_PIXELS = 16_000_000;
 
@@ -17,9 +18,10 @@ export function usePdfPageRender(
   cssScale: number,
   enabled: boolean,
   debounceMs = 120,
-): { rendered: boolean; error: string | null } {
+): { rendered: boolean; error: string | null; renderCount: number } {
   const [rendered, setRendered] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [renderCount, setRenderCount] = useState(0);
 
   useEffect(() => {
     if (!enabled) {
@@ -46,6 +48,11 @@ export function usePdfPageRender(
         task = page.render({ canvas: off, viewport, background: '#ffffff' });
         await task.promise;
         if (cancelled) return;
+
+        // Cleanly heal any edited original text lines on the newly rendered buffer
+        // BEFORE drawing it to target, ensuring 0 flicker and 0 overwriting on zoom!
+        healCanvasForPage(off, pageIndex, base.width);
+
         const target = canvasRef.current;
         if (!target) return;
         target.width = off.width;
@@ -53,6 +60,7 @@ export function usePdfPageRender(
         target.getContext('2d')?.drawImage(off, 0, 0);
         off.width = off.height = 0;
         setRendered(true);
+        setRenderCount((c) => c + 1);
         setError(null);
       } catch (err) {
         if (cancelled || (err as { name?: string })?.name === 'RenderingCancelledException') return;
@@ -69,5 +77,5 @@ export function usePdfPageRender(
     // `rendered` is intentionally not a dependency: it only picks the debounce delay.
   }, [proxy, pageIndex, cssScale, enabled, canvasRef, debounceMs]);
 
-  return { rendered, error };
+  return { rendered, error, renderCount };
 }

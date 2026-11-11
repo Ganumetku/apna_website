@@ -2,6 +2,7 @@
 // and expects a global `regeneratorRuntime`; without it Hindi text throws.
 import 'regenerator-runtime/runtime';
 import fontkit from '@pdf-lib/fontkit';
+import pako from 'pako';
 import { util, type FabricObject, type Line, type Path, type Textbox, type Ellipse, type FabricImage } from 'fabric';
 import {
   BlendMode,
@@ -9,6 +10,8 @@ import {
   LineCapStyle,
   LineJoinStyle,
   PDFDocument,
+  PDFName,
+  PDFNumber,
   concatTransformationMatrix,
   popGraphicsState,
   pushGraphicsState,
@@ -103,6 +106,7 @@ export async function exportPdf(doc: LoadedDocument, objects: PageObjects, onPro
       // leaves behind (an unbalanced `cm`, say) cannot shift our drawings.
       page.node.normalize();
       const live = await util.enlivenObjects<FabricObject>(serialized as unknown as Record<string, unknown>[]);
+      suppressOriginalTextInPage(page, pdfDoc, live);
       for (const obj of live) {
         await drawObject(page, obj, toUser, { fonts, images, pdfDoc });
       }
@@ -116,6 +120,110 @@ export async function exportPdf(doc: LoadedDocument, objects: PageObjects, onPro
   pdfDoc.setModificationDate(new Date());
   const bytes = await pdfDoc.save({ useObjectStreams: true });
   return { bytes, flattened };
+}
+
+function latin1BytesToString(bytes: Uint8Array): string {
+  let str = '';
+  const chunk = 8192;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    str += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return str;
+}
+
+function stringToLatin1Bytes(str: string): Uint8Array {
+  const bytes = new Uint8Array(str.length);
+  for (let i = 0; i < str.length; i += 1) bytes[i] = str.charCodeAt(i) & 0xff;
+  return bytes;
+}
+
+/**
+ * Remove/suppress original printed text strings from the PDF page content stream
+ * so the old text does not show under the new text, without needing any solid white box!
+ */
+function suppressOriginalTextInPage(page: PDFPage, pdfDoc: PDFDocument, liveObjects: FabricObject[]): void {
+  const targetTexts: string[] = [];
+  for (const obj of liveObjects) {
+    if (obj.kind === 'text') {
+      const tb = obj as unknown as { sourceLineId?: string; sourceOriginalText?: string; text?: string };
+      if (tb.sourceLineId && tb.sourceOriginalText && tb.sourceOriginalText !== tb.text) {
+        const trimmed = tb.sourceOriginalText.trim();
+        if (trimmed) targetTexts.push(trimmed);
+      }
+    }
+  }
+  if (!targetTexts.length) return;
+
+  const contents = page.node.Contents();
+  if (!contents) return;
+
+  const contentsHelper = contents as unknown as { size?: () => number; get?: (i: number) => unknown };
+  const count = typeof contentsHelper.size === 'function' ? contentsHelper.size() : 1;
+  for (let c = 0; c < count; c += 1) {
+    const streamRef = typeof contentsHelper.get === 'function' ? contentsHelper.get(c) : contents;
+    const stream = pdfDoc.context.lookup(streamRef as unknown as Parameters<typeof pdfDoc.context.lookup>[0]) as unknown as {
+      getContents?: () => Uint8Array;
+      contents?: Uint8Array;
+      dict?: { set: (k: unknown, v: unknown) => void };
+    };
+    if (!stream || typeof stream.getContents !== 'function') continue;
+
+    const raw = stream.getContents();
+    let isCompressed = false;
+    let decoded = '';
+    try {
+      decoded = pako.inflate(raw, { to: 'string' }) as string;
+      isCompressed = true;
+    } catch {
+      decoded = latin1BytesToString(raw);
+    }
+
+    let modified = false;
+    for (const target of targetTexts) {
+      if (!target) continue;
+
+      // 1. Literal string in Tj: ( 401107)Tj or (401107)Tj
+      const litEsc = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const litRegex = new RegExp(`\\(\\s*${litEsc}\\s*\\)\\s*Tj`, 'g');
+      if (litRegex.test(decoded)) {
+        decoded = decoded.replace(litRegex, (match) => {
+          const spaces = ' '.repeat(Math.max(0, match.length - 4));
+          return `(${spaces})Tj`;
+        });
+        modified = true;
+      }
+
+      // 2. Hex string in Tj: <343031313037> Tj
+      const hex = Array.from(target)
+        .map((ch) => ch.charCodeAt(0).toString(16).padStart(2, '0'))
+        .join('');
+      const hexRegex = new RegExp(`<\\s*(?:20)*${hex}\\s*>\\s*Tj`, 'gi');
+      if (hexRegex.test(decoded)) {
+        decoded = decoded.replace(hexRegex, '() Tj');
+        modified = true;
+      }
+
+      // 3. Spaced text in TJ array: [ ... (401107) ... ] TJ
+      const tjRegex = new RegExp(`\\(\\s*${litEsc}\\s*\\)`, 'g');
+      if (tjRegex.test(decoded)) {
+        decoded = decoded.replace(tjRegex, '()');
+        modified = true;
+      }
+    }
+
+    if (modified) {
+      try {
+        const uncompressedBytes = stringToLatin1Bytes(decoded);
+        const newBytes = isCompressed ? pako.deflate(uncompressedBytes) : uncompressedBytes;
+        stream.contents = newBytes;
+        if (stream.dict?.set) {
+          stream.dict.set(PDFName.of('Length'), PDFNumber.of(newBytes.length));
+        }
+      } catch (err) {
+        console.warn('Could not update content stream:', err);
+      }
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ objects */
@@ -137,8 +245,14 @@ async function drawObject(page: PDFPage, obj: FabricObject, toUser: Matrix, ctx:
     switch (obj.kind) {
       case 'rect':
       case 'highlight':
-      case 'whiteout':
         drawRect(page, obj);
+        break;
+      case 'whiteout':
+        // Only draw deliberate user-created whiteout rectangles (created with whiteout tool).
+        // Never draw whiteout covers for edited text lines!
+        if (!obj.sourceLineId) {
+          drawRect(page, obj);
+        }
         break;
       case 'ellipse':
         drawEllipse(page, obj as Ellipse);
@@ -298,6 +412,20 @@ async function drawText(page: PDFPage, obj: Textbox, fonts: FontEmbedder) {
   const opacity = fill.alpha * (obj.opacity ?? 1);
   const def = fontDefFromStack(obj.fontFamily);
   const size = obj.fontSize;
+
+  if (obj.backgroundColor && obj.backgroundColor !== 'transparent' && obj.backgroundColor !== 'none') {
+    const bg = parseColor(obj.backgroundColor);
+    if (bg) {
+      page.drawRectangle({
+        x: -obj.width / 2,
+        y: -obj.height / 2,
+        width: obj.width,
+        height: obj.height,
+        color: bg.color,
+        opacity: bg.alpha * (obj.opacity ?? 1),
+      });
+    }
+  }
 
   // Fabric internals (stable across v5–v7): `_textLines` holds the wrapped
   // lines as grapheme arrays, `getHeightOfLineImpl` the unscaled line height.

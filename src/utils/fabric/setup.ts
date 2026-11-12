@@ -31,6 +31,8 @@ declare module 'fabric' {
     sourceLineWidth?: number;
     sourceLineHeight?: number;
     sourceBaseline?: number;
+    sourceBackgroundPatch?: string;
+    sourceUserBackground?: string;
     /** True once the original glyphs have been covered and the overlay is painted. */
     sourcePainted?: boolean;
   }
@@ -55,6 +57,8 @@ declare module 'fabric' {
     sourceLineWidth?: number;
     sourceLineHeight?: number;
     sourceBaseline?: number;
+    sourceBackgroundPatch?: string;
+    sourceUserBackground?: string;
     sourcePainted?: boolean;
   }
 }
@@ -81,6 +85,8 @@ FabricObject.customProperties = [
   'sourceLineWidth',
   'sourceLineHeight',
   'sourceBaseline',
+  'sourceBackgroundPatch',
+  'sourceUserBackground',
   'sourcePainted',
 ];
 

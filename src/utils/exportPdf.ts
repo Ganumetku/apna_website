@@ -235,7 +235,8 @@ interface DrawContext {
 }
 
 async function drawObject(page: PDFPage, obj: FabricObject, toUser: Matrix, ctx: DrawContext) {
-  if (!obj.visible || (obj.opacity ?? 1) <= 0) return;
+  const isDeletedOriginal = obj.kind === 'text' && !!(obj as Textbox).sourceLineId && !(obj as Textbox).text;
+  if (!isDeletedOriginal && (!obj.visible || (obj.opacity ?? 1) <= 0)) return;
 
   // The single most important line of the exporter: object-local -> PDF user space.
   const m = objectToUserSpace(toUser, obj.calcTransformMatrix() as Matrix);
@@ -269,7 +270,7 @@ async function drawObject(page: PDFPage, obj: FabricObject, toUser: Matrix, ctx:
         drawPath(page, obj as Path);
         break;
       case 'text':
-        await drawText(page, obj as Textbox, ctx.fonts);
+        await drawText(page, obj as Textbox, ctx.fonts, ctx.pdfDoc);
         break;
       case 'image':
         await drawImage(page, obj as FabricImage, ctx);
@@ -406,26 +407,81 @@ function drawSvgInLocalFrame(page: PDFPage, d: string, options: Parameters<PDFPa
  * Text._renderTextCommon / _renderChars) so line breaks match the screen.
  * Horizontal alignment is recomputed with the embedded font's metrics.
  */
-async function drawText(page: PDFPage, obj: Textbox, fonts: FontEmbedder) {
-  const fill = parseColor(obj.fill);
-  if (!fill || !obj.text) return;
-  const opacity = fill.alpha * (obj.opacity ?? 1);
-  const def = fontDefFromStack(obj.fontFamily);
-  const size = obj.fontSize;
+async function drawText(page: PDFPage, obj: Textbox, fonts: FontEmbedder, pdfDoc: PDFDocument) {
+  page.pushOperators(
+    // Text in Fabric has origin at top-left; in PDF it's bottom-left. Flip Y.
+    concatTransformationMatrix(1, 0, 0, -1, 0, 0),
+    pushGraphicsState(),
+  );
 
-  if (obj.backgroundColor && obj.backgroundColor !== 'transparent' && obj.backgroundColor !== 'none') {
-    const bg = parseColor(obj.backgroundColor);
-    if (bg) {
-      page.drawRectangle({
-        x: -obj.width / 2,
-        y: -obj.height / 2,
-        width: obj.width,
-        height: obj.height,
-        color: bg.color,
-        opacity: bg.alpha * (obj.opacity ?? 1),
-      });
+  try {
+    // 1. If this text replaces an original PDF line, cover the original text underneath
+    // so it never overwrites / double-prints in the exported PDF!
+    if (obj.sourceLineId && obj.sourceOriginalText !== undefined && obj.text !== obj.sourceOriginalText) {
+      const coverW = Math.max(obj.width, obj.sourceCoverWidth ?? obj.width);
+      const coverH = Math.max(obj.height, obj.sourceCoverHeight ?? obj.height);
+      const pad = Math.max(1, obj.fontSize * 0.08);
+      const coverX = -obj.width / 2 + (obj.sourceCoverDx ?? 0) - pad;
+      const coverY = -obj.height / 2 + (obj.sourceCoverDy ?? 0) - pad;
+      const drawW = coverW + pad * 2;
+      const drawH = coverH + pad * 2;
+
+      let drewPatch = false;
+      if (obj.sourceBackgroundPatch) {
+        try {
+          const { bytes } = dataUrlToBytes(obj.sourceBackgroundPatch);
+          const patchImg = await pdfDoc.embedPng(bytes);
+          page.pushOperators(pushGraphicsState(), concatTransformationMatrix(1, 0, 0, -1, 0, 0));
+          page.drawImage(patchImg, {
+            x: coverX,
+            y: -coverY - drawH,
+            width: drawW,
+            height: drawH,
+          });
+          page.pushOperators(popGraphicsState());
+          drewPatch = true;
+        } catch (err) {
+          console.warn('Could not embed background patch image:', err);
+        }
+      }
+
+      if (!drewPatch) {
+        const coverColor = obj.sourceUserBackground || (obj.sourcePaper && obj.sourcePaper !== 'transparent' && obj.sourcePaper !== 'none'
+          ? obj.sourcePaper
+          : '#ffffff');
+        const bg = parseColor(coverColor);
+        if (bg) {
+          page.drawRectangle({
+            x: coverX,
+            y: coverY,
+            width: drawW,
+            height: drawH,
+            color: bg.color,
+            opacity: 1,
+          });
+        }
+      }
     }
-  }
+
+    const fill = parseColor(obj.fill);
+    if (!fill || !obj.text) return;
+    const opacity = fill.alpha * (obj.opacity ?? 1);
+    const def = fontDefFromStack(obj.fontFamily);
+    const size = obj.fontSize;
+
+    if (obj.backgroundColor && obj.backgroundColor !== 'transparent' && obj.backgroundColor !== 'none') {
+      const bg = parseColor(obj.backgroundColor);
+      if (bg) {
+        page.drawRectangle({
+          x: -obj.width / 2,
+          y: -obj.height / 2,
+          width: obj.width,
+          height: obj.height,
+          color: bg.color,
+          opacity: bg.alpha * (obj.opacity ?? 1),
+        });
+      }
+    }
 
   // Fabric internals (stable across v5–v7): `_textLines` holds the wrapped
   // lines as grapheme arrays, `getHeightOfLineImpl` the unscaled line height.
@@ -535,6 +591,9 @@ async function drawText(page: PDFPage, obj: Textbox, fonts: FontEmbedder) {
         borderWidth: 0,
       });
     }
+  }
+  } finally {
+    page.pushOperators(popGraphicsState());
   }
 }
 

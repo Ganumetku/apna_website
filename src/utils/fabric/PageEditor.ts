@@ -12,7 +12,7 @@ import {
   overlayFontStack,
 } from '../fonts';
 import { newId } from '../id';
-import { detectUnderline, healLineOnCanvas, sampleLineColors, sampleLineLooksBold, type TextLine, type TextSpan } from '../textExtraction';
+import { detectUnderline, extractCanvasPatch, healLineOnCanvas, sampleLineColors, sampleLineLooksBold, type TextLine, type TextSpan } from '../textExtraction';
 import { createBox, createImage, createLine, createText, reidentify, type BoxKind, type LineKind } from './objectFactory';
 import { forEachEditor } from './editorRegistry';
 import { applyStyle, readStyle } from './styleMapping';
@@ -322,7 +322,7 @@ export class PageEditor {
         sourceFontStyle: fontStyle,
         sourcePdfFace: pdfFace,
         sourceInk: colors.ink,
-        sourcePaper: 'transparent',
+        sourcePaper: colors.paper,
         sourceVisualBold: visualBold,
         sourceCssFamily: line.cssFamily,
         sourceCoverDx: -padX,
@@ -419,10 +419,20 @@ export class PageEditor {
         baseline: tb.sourceBaseline,
       };
       healLineOnCanvas(pdfCanvas, lineInfo, this.page.width);
+
+      // Capture the healed background patch for export so watermarks & textures are 100% preserved
+      try {
+        const patch = extractCanvasPatch(pdfCanvas, lineInfo, this.page.width);
+        if (patch) {
+          tb.sourceBackgroundPatch = patch;
+        }
+      } catch (err) {
+        console.warn('Could not extract canvas patch:', err);
+      }
     }
 
-    // Only create a cover if the user explicitly configured a solid background color
-    if (tb.sourcePaper && tb.sourcePaper !== 'transparent' && tb.sourcePaper !== 'none') {
+    // Only create a cover in the UI if the user explicitly configured a solid background color
+    if (tb.sourceUserBackground && tb.sourceUserBackground !== 'transparent' && tb.sourceUserBackground !== 'none') {
       if (!this.coverFor(tb)) {
         const cover = new Rect({
           id: newId(),
@@ -434,7 +444,7 @@ export class PageEditor {
           top: tb.top + (tb.sourceCoverDy ?? 0),
           width: tb.sourceCoverWidth ?? tb.getScaledWidth(),
           height: tb.sourceCoverHeight ?? tb.fontSize,
-          fill: tb.sourcePaper,
+          fill: tb.sourceUserBackground,
           stroke: null,
           strokeWidth: 0,
           selectable: false,
@@ -968,7 +978,8 @@ export class PageEditor {
         if ('fillColor' in patch) {
           const color = patch.fillColor;
           const isTransparent = !color || color === 'transparent' || color === 'none';
-          o.sourcePaper = isTransparent ? 'transparent' : color;
+          o.sourceUserBackground = isTransparent ? undefined : color;
+          if (!isTransparent) o.sourcePaper = color;
           const covers = this.coversForLine(o.sourceLineId);
           if (covers.length) {
             covers.forEach((c) => {

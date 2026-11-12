@@ -713,6 +713,42 @@ export function healLineOnCanvas(
 }
 
 /**
+ * Extract a high-res image patch of the healed canvas under a line,
+ * preserving watermarks, background patterns, or table cell shading for export.
+ */
+export function extractCanvasPatch(
+  canvas: HTMLCanvasElement,
+  line: { left: number; top?: number; width: number; height?: number; fontSize: number; baseline?: number },
+  pageWidth: number,
+): string | null {
+  if (!canvas.width || !canvas.height) return null;
+  const scale = canvas.width / pageWidth;
+  const padX = Math.max(2, Math.ceil(line.fontSize * 0.12 * scale));
+  const padY = Math.max(2, Math.ceil(line.fontSize * 0.12 * scale));
+
+  const boxTop = line.top !== undefined ? line.top : (line.baseline ?? line.fontSize) - line.fontSize * 0.85;
+  const boxHeight = line.height !== undefined ? line.height : line.fontSize * 1.25;
+
+  const x = Math.max(0, Math.floor(line.left * scale) - padX);
+  const y = Math.max(0, Math.floor(boxTop * scale) - padY);
+  const w = Math.min(canvas.width - x, Math.ceil(line.width * scale) + padX * 2);
+  const h = Math.min(canvas.height - y, Math.ceil(boxHeight * scale) + padY * 2);
+  if (w <= 0 || h <= 0) return null;
+
+  try {
+    const patchCanvas = document.createElement('canvas');
+    patchCanvas.width = w;
+    patchCanvas.height = h;
+    const pctx = patchCanvas.getContext('2d');
+    if (!pctx) return null;
+    pctx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
+    return patchCanvas.toDataURL('image/png');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * True when the printed glyphs are visually bold (Times Bold, Word fake-bold,
  * fill+stroke) even if the font name does not say so. Scans stem width at
  * x-height; Regular Times is ~0.08em, Bold ~0.14em.

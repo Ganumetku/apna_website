@@ -106,9 +106,9 @@ export async function exportPdf(doc: LoadedDocument, objects: PageObjects, onPro
       // leaves behind (an unbalanced `cm`, say) cannot shift our drawings.
       page.node.normalize();
       const live = await util.enlivenObjects<FabricObject>(serialized as unknown as Record<string, unknown>[]);
-      suppressOriginalTextInPage(page, pdfDoc, live);
+      const suppressed = suppressOriginalTextInPage(page, pdfDoc, live);
       for (const obj of live) {
-        await drawObject(page, obj, toUser, { fonts, images, pdfDoc });
+        await drawObject(page, obj, toUser, { fonts, images, pdfDoc, suppressed });
       }
     }
     onProgress?.(i + 1, total);
@@ -141,21 +141,43 @@ function stringToLatin1Bytes(str: string): Uint8Array {
  * Remove/suppress original printed text strings from the PDF page content stream
  * so the old text does not show under the new text, without needing any solid white box!
  */
-function suppressOriginalTextInPage(page: PDFPage, pdfDoc: PDFDocument, liveObjects: FabricObject[]): void {
-  const targetTexts: string[] = [];
+function suppressOriginalTextInPage(page: PDFPage, pdfDoc: PDFDocument, liveObjects: FabricObject[]): Set<string> {
+  const suppressedLineIds = new Set<string>();
+  const lineTargets: Array<{ lineId: string; candidates: string[] }> = [];
+
   for (const obj of liveObjects) {
     if (obj.kind === 'text') {
       const tb = obj as unknown as { sourceLineId?: string; sourceOriginalText?: string; text?: string };
       if (tb.sourceLineId && tb.sourceOriginalText && tb.sourceOriginalText !== tb.text) {
-        const trimmed = tb.sourceOriginalText.trim();
-        if (trimmed) targetTexts.push(trimmed);
+        const orig = tb.sourceOriginalText.trim();
+        if (!orig) continue;
+        const candidates = new Set<string>();
+        candidates.add(orig);
+
+        // Also add non-empty space-delimited words (e.g. "PIN", "Code:", "401107")
+        const words = orig.split(/\s+/).filter(Boolean);
+        for (const w of words) {
+          if (w.length >= 2) candidates.add(w);
+        }
+
+        // Also add multi-word combinations like "PIN Code:"
+        for (let i = 0; i < words.length; i++) {
+          let phrase = words[i];
+          for (let j = i + 1; j < words.length; j++) {
+            phrase += ' ' + words[j];
+            candidates.add(phrase);
+          }
+        }
+
+        lineTargets.push({ lineId: tb.sourceLineId, candidates: Array.from(candidates) });
       }
     }
   }
-  if (!targetTexts.length) return;
+
+  if (!lineTargets.length) return suppressedLineIds;
 
   const contents = page.node.Contents();
-  if (!contents) return;
+  if (!contents) return suppressedLineIds;
 
   const contentsHelper = contents as unknown as { size?: () => number; get?: (i: number) => unknown };
   const count = typeof contentsHelper.size === 'function' ? contentsHelper.size() : 1;
@@ -179,35 +201,46 @@ function suppressOriginalTextInPage(page: PDFPage, pdfDoc: PDFDocument, liveObje
     }
 
     let modified = false;
-    for (const target of targetTexts) {
-      if (!target) continue;
+    for (const { lineId, candidates } of lineTargets) {
+      let lineMatched = false;
+      // Sort longer candidates first so full phrases match before single words
+      const sortedCands = [...candidates].sort((a, b) => b.length - a.length);
 
-      // 1. Literal string in Tj: ( 401107)Tj or (401107)Tj
-      const litEsc = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const litRegex = new RegExp(`\\(\\s*${litEsc}\\s*\\)\\s*Tj`, 'g');
-      if (litRegex.test(decoded)) {
-        decoded = decoded.replace(litRegex, (match) => {
-          const spaces = ' '.repeat(Math.max(0, match.length - 4));
-          return `(${spaces})Tj`;
-        });
-        modified = true;
+      for (const target of sortedCands) {
+        // 1. Literal string in Tj: ( 401107)Tj or (401107)Tj
+        const litEsc = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const litRegex = new RegExp(`\\(\\s*${litEsc}\\s*\\)\\s*Tj`, 'g');
+        if (litRegex.test(decoded)) {
+          decoded = decoded.replace(litRegex, (match) => {
+            const spaces = ' '.repeat(Math.max(0, match.length - 4));
+            return `(${spaces})Tj`;
+          });
+          modified = true;
+          lineMatched = true;
+        }
+
+        // 2. Hex string in Tj: <343031313037> Tj
+        const hex = Array.from(target)
+          .map((ch) => ch.charCodeAt(0).toString(16).padStart(2, '0'))
+          .join('');
+        const hexRegex = new RegExp(`<\\s*(?:20)*${hex}\\s*>\\s*Tj`, 'gi');
+        if (hexRegex.test(decoded)) {
+          decoded = decoded.replace(hexRegex, '() Tj');
+          modified = true;
+          lineMatched = true;
+        }
+
+        // 3. Spaced text in TJ array: [ ... (401107) ... ] TJ
+        const tjRegex = new RegExp(`\\(\\s*${litEsc}\\s*\\)`, 'g');
+        if (tjRegex.test(decoded)) {
+          decoded = decoded.replace(tjRegex, '()');
+          modified = true;
+          lineMatched = true;
+        }
       }
 
-      // 2. Hex string in Tj: <343031313037> Tj
-      const hex = Array.from(target)
-        .map((ch) => ch.charCodeAt(0).toString(16).padStart(2, '0'))
-        .join('');
-      const hexRegex = new RegExp(`<\\s*(?:20)*${hex}\\s*>\\s*Tj`, 'gi');
-      if (hexRegex.test(decoded)) {
-        decoded = decoded.replace(hexRegex, '() Tj');
-        modified = true;
-      }
-
-      // 3. Spaced text in TJ array: [ ... (401107) ... ] TJ
-      const tjRegex = new RegExp(`\\(\\s*${litEsc}\\s*\\)`, 'g');
-      if (tjRegex.test(decoded)) {
-        decoded = decoded.replace(tjRegex, '()');
-        modified = true;
+      if (lineMatched) {
+        suppressedLineIds.add(lineId);
       }
     }
 
@@ -224,6 +257,8 @@ function suppressOriginalTextInPage(page: PDFPage, pdfDoc: PDFDocument, liveObje
       }
     }
   }
+
+  return suppressedLineIds;
 }
 
 /* ------------------------------------------------------------------ objects */
@@ -232,6 +267,7 @@ interface DrawContext {
   pdfDoc: PDFDocument;
   fonts: FontEmbedder;
   images: Map<string, Promise<PDFImage>>;
+  suppressed?: Set<string>;
 }
 
 async function drawObject(page: PDFPage, obj: FabricObject, toUser: Matrix, ctx: DrawContext) {
@@ -270,7 +306,7 @@ async function drawObject(page: PDFPage, obj: FabricObject, toUser: Matrix, ctx:
         drawPath(page, obj as Path);
         break;
       case 'text':
-        await drawText(page, obj as Textbox, ctx.fonts, ctx.pdfDoc);
+        await drawText(page, obj as Textbox, ctx.fonts, ctx.suppressed);
         break;
       case 'image':
         await drawImage(page, obj as FabricImage, ctx);
@@ -407,81 +443,57 @@ function drawSvgInLocalFrame(page: PDFPage, d: string, options: Parameters<PDFPa
  * Text._renderTextCommon / _renderChars) so line breaks match the screen.
  * Horizontal alignment is recomputed with the embedded font's metrics.
  */
-async function drawText(page: PDFPage, obj: Textbox, fonts: FontEmbedder, pdfDoc: PDFDocument) {
-  page.pushOperators(
-    // Text in Fabric has origin at top-left; in PDF it's bottom-left. Flip Y.
-    concatTransformationMatrix(1, 0, 0, -1, 0, 0),
-    pushGraphicsState(),
-  );
-
-  try {
-    // 1. If this text replaces an original PDF line, cover the original text underneath
-    // so it never overwrites / double-prints in the exported PDF!
-    if (obj.sourceLineId && obj.sourceOriginalText !== undefined && obj.text !== obj.sourceOriginalText) {
+async function drawText(page: PDFPage, obj: Textbox, fonts: FontEmbedder, suppressed?: Set<string>) {
+  // 1. If this text replaces an original PDF line that was NOT suppressed in the content stream,
+  // cover the original text underneath with its background color so it never overwrites / double-prints!
+  if (obj.sourceLineId && obj.sourceOriginalText !== undefined && obj.text !== obj.sourceOriginalText) {
+    const isSuppressed = !!(suppressed && suppressed.has(obj.sourceLineId));
+    if (!isSuppressed) {
       const coverW = Math.max(obj.width, obj.sourceCoverWidth ?? obj.width);
       const coverH = Math.max(obj.height, obj.sourceCoverHeight ?? obj.height);
-      const pad = Math.max(1, obj.fontSize * 0.08);
-      const coverX = -obj.width / 2 + (obj.sourceCoverDx ?? 0) - pad;
-      const coverY = -obj.height / 2 + (obj.sourceCoverDy ?? 0) - pad;
-      const drawW = coverW + pad * 2;
-      const drawH = coverH + pad * 2;
+      const padX = Math.max(0.5, obj.fontSize * 0.05);
+      const padY = Math.max(0.5, obj.fontSize * 0.05);
+      const coverX = -obj.width / 2 + (obj.sourceCoverDx ?? -padX);
+      const coverY = -obj.height / 2 + (obj.sourceCoverDy ?? -padY);
+      const drawW = coverW + padX * 2;
+      const drawH = coverH + padY * 2;
 
-      let drewPatch = false;
-      if (obj.sourceBackgroundPatch) {
-        try {
-          const { bytes } = dataUrlToBytes(obj.sourceBackgroundPatch);
-          const patchImg = await pdfDoc.embedPng(bytes);
-          page.pushOperators(pushGraphicsState(), concatTransformationMatrix(1, 0, 0, -1, 0, 0));
-          page.drawImage(patchImg, {
-            x: coverX,
-            y: -coverY - drawH,
-            width: drawW,
-            height: drawH,
-          });
-          page.pushOperators(popGraphicsState());
-          drewPatch = true;
-        } catch (err) {
-          console.warn('Could not embed background patch image:', err);
-        }
-      }
-
-      if (!drewPatch) {
-        const coverColor = obj.sourceUserBackground || (obj.sourcePaper && obj.sourcePaper !== 'transparent' && obj.sourcePaper !== 'none'
-          ? obj.sourcePaper
-          : '#ffffff');
-        const bg = parseColor(coverColor);
-        if (bg) {
-          page.drawRectangle({
-            x: coverX,
-            y: coverY,
-            width: drawW,
-            height: drawH,
-            color: bg.color,
-            opacity: 1,
-          });
-        }
-      }
-    }
-
-    const fill = parseColor(obj.fill);
-    if (!fill || !obj.text) return;
-    const opacity = fill.alpha * (obj.opacity ?? 1);
-    const def = fontDefFromStack(obj.fontFamily);
-    const size = obj.fontSize;
-
-    if (obj.backgroundColor && obj.backgroundColor !== 'transparent' && obj.backgroundColor !== 'none') {
-      const bg = parseColor(obj.backgroundColor);
+      const coverColor = obj.sourceUserBackground || (obj.sourcePaper && obj.sourcePaper !== 'transparent' && obj.sourcePaper !== 'none'
+        ? obj.sourcePaper
+        : '#ffffff');
+      const bg = parseColor(coverColor);
       if (bg) {
         page.drawRectangle({
-          x: -obj.width / 2,
-          y: -obj.height / 2,
-          width: obj.width,
-          height: obj.height,
+          x: coverX,
+          y: coverY,
+          width: drawW,
+          height: drawH,
           color: bg.color,
-          opacity: bg.alpha * (obj.opacity ?? 1),
+          opacity: 1,
         });
       }
     }
+  }
+
+  const fill = parseColor(obj.fill);
+  if (!fill || !obj.text) return;
+  const opacity = fill.alpha * (obj.opacity ?? 1);
+  const def = fontDefFromStack(obj.fontFamily);
+  const size = obj.fontSize;
+
+  if (obj.backgroundColor && obj.backgroundColor !== 'transparent' && obj.backgroundColor !== 'none') {
+    const bg = parseColor(obj.backgroundColor);
+    if (bg) {
+      page.drawRectangle({
+        x: -obj.width / 2,
+        y: -obj.height / 2,
+        width: obj.width,
+        height: obj.height,
+        color: bg.color,
+        opacity: bg.alpha * (obj.opacity ?? 1),
+      });
+    }
+  }
 
   // Fabric internals (stable across v5–v7): `_textLines` holds the wrapped
   // lines as grapheme arrays, `getHeightOfLineImpl` the unscaled line height.
@@ -500,6 +512,9 @@ async function drawText(page: PDFPage, obj: Textbox, fonts: FontEmbedder, pdfDoc
   const left = -obj.width / 2;
   let lineTop = -obj.height / 2;
 
+  const isLineBold = isBold(obj.fontWeight) || !!obj.sourceVisualBold || isBold(obj.sourceFontWeight);
+  const isLineItalic = obj.fontStyle === 'italic' || obj.sourceFontStyle === 'italic';
+
   for (let i = 0; i < t._textLines.length; i += 1) {
     const graphemes = t._textLines[i];
     const lineImpl = t.getHeightOfLineImpl(i);
@@ -516,8 +531,12 @@ async function drawText(page: PDFPage, obj: Textbox, fonts: FontEmbedder, pdfDoc
     const pieces: Piece[] = [];
     for (let c = 0; c < end; c += 1) {
       const style = t.getCompleteStyleDeclaration(i, c);
-      const pieceBold = isBold(style.fontWeight);
-      const pieceItalic = style.fontStyle === 'italic';
+      const pieceBold = (style.fontWeight !== undefined && style.fontWeight !== obj.fontWeight)
+        ? isBold(style.fontWeight)
+        : isLineBold;
+      const pieceItalic = (style.fontStyle !== undefined && style.fontStyle !== obj.fontStyle)
+        ? style.fontStyle === 'italic'
+        : isLineItalic;
       const pieceSize = style.fontSize || size;
       const pieceFamily = style.fontFamily || def.family;
       const last = pieces[pieces.length - 1];
@@ -591,9 +610,6 @@ async function drawText(page: PDFPage, obj: Textbox, fonts: FontEmbedder, pdfDoc
         borderWidth: 0,
       });
     }
-  }
-  } finally {
-    page.pushOperators(popGraphicsState());
   }
 }
 

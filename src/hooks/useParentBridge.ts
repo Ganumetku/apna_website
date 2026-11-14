@@ -4,6 +4,7 @@ import { isLoadPdfMessage } from '../types/embed';
 import {
   allowedOrigins,
   announceReady,
+  getHostWindow,
   getVerifiedParentOrigin,
   isEmbedMode,
   sendError,
@@ -20,12 +21,13 @@ import { confirmLargePdf, openPdfBytes } from '../utils/openPdf';
  */
 export function useParentBridge() {
   useEffect(() => {
-    if (!isEmbedMode() || window.parent === window) return;
+    const host = getHostWindow();
+    if (!isEmbedMode() || !host) return;
 
     announceReady();
 
     const onMessage = (event: MessageEvent) => {
-      if (event.source !== window.parent) return;
+      if (event.source !== host) return;
 
       const trusted = getVerifiedParentOrigin();
       if (trusted && event.origin !== trusted) {

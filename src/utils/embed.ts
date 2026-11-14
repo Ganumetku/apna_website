@@ -34,9 +34,20 @@ export function allowedOrigins(): string[] {
   return origins;
 }
 
-/** Optional second button in embed mode. Default off. Set VITE_EMBED_SHOW_DOWNLOAD=true. */
+/** Optional second button in embed mode. Default off, but on when opened in a popup/tab. */
 export function embedShowDownload(): boolean {
+  if (typeof window !== 'undefined' && window.opener && !window.opener.closed) {
+    return true;
+  }
   return import.meta.env.VITE_EMBED_SHOW_DOWNLOAD === 'true';
+}
+
+/** Get parent iframe or opener window */
+export function getHostWindow(): Window | null {
+  if (typeof window === 'undefined') return null;
+  if (window.parent && window.parent !== window) return window.parent;
+  if (window.opener && !window.opener.closed) return window.opener;
+  return null;
 }
 
 /**
@@ -58,17 +69,19 @@ export function setVerifiedParentOrigin(origin: string): void {
 
 export function postToParent(message: EditorToParentMessage, transfer: Transferable[] = []): boolean {
   const origin = verifiedParentOrigin;
-  if (!origin || window.parent === window) return false;
-  window.parent.postMessage(message, origin, transfer);
+  const host = getHostWindow();
+  if (!origin || !host) return false;
+  host.postMessage(message, origin, transfer);
   return true;
 }
 
-/** Tell every allow-listed parent that the editor can accept LOAD_PDF. */
+/** Tell every allow-listed parent/opener that the editor can accept LOAD_PDF. */
 export function announceReady(): void {
-  if (typeof window === 'undefined' || window.parent === window) return;
+  const host = getHostWindow();
+  if (!host) return;
   const message: EditorToParentMessage = { type: 'EDITOR_READY' };
   for (const origin of allowedOrigins()) {
-    window.parent.postMessage(message, origin);
+    host.postMessage(message, origin);
   }
 }
 

@@ -572,19 +572,21 @@ export function sampleLineColors(canvas: HTMLCanvasElement, line: TextLine, page
 }
 
 /**
- * Remove/inpaint original printed glyphs on the underlying PDF canvas so the
- * watermark, table lines, and background flow seamlessly without any white box.
+ * Remove/heal original printed glyphs on the underlying PDF canvas so the
+ * background (paper, watermark, table cell) is left completely clean with
+ * zero shadows, ghost outlines, or crosshatching artifacts.
  */
 export function healLineOnCanvas(
   canvas: HTMLCanvasElement,
   line: { left: number; top?: number; width: number; height?: number; fontSize: number; baseline?: number },
   pageWidth: number,
+  paperColorHint?: string,
 ): void {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx || !canvas.width) return;
   const scale = canvas.width / pageWidth;
-  const padX = Math.max(3, Math.ceil(line.fontSize * 0.2 * scale));
-  const padY = Math.max(3, Math.ceil(line.fontSize * 0.2 * scale));
+  const padX = Math.max(3, Math.ceil(line.fontSize * 0.25 * scale));
+  const padY = Math.max(3, Math.ceil(line.fontSize * 0.25 * scale));
 
   const boxTop = line.top !== undefined ? line.top : (line.baseline ?? line.fontSize) - line.fontSize * 0.85;
   const boxHeight = line.height !== undefined ? line.height : line.fontSize * 1.25;
@@ -603,107 +605,210 @@ export function healLineOnCanvas(
   }
   const data = imgData.data;
 
-  // 1. Calculate average background luminance from perimeter pixels
-  let bgLumSum = 0;
-  let bgCount = 0;
+  // 1. Determine dominant paper (background) color from perimeter pixels
+  let pr = 255;
+  let pg = 255;
+  let pb = 255;
+  let hasValidPaperHint = false;
+
+  if (paperColorHint && paperColorHint.startsWith('#') && paperColorHint.length >= 7) {
+    const hr = parseInt(paperColorHint.slice(1, 3), 16);
+    const hg = parseInt(paperColorHint.slice(3, 5), 16);
+    const hb = parseInt(paperColorHint.slice(5, 7), 16);
+    if (!Number.isNaN(hr) && !Number.isNaN(hg) && !Number.isNaN(hb)) {
+      pr = hr;
+      pg = hg;
+      pb = hb;
+      hasValidPaperHint = true;
+    }
+  }
+
+  const perimBins = new Map<number, { count: number; r: number; g: number; b: number }>();
+  const perimThickness = Math.max(2, Math.min(6, Math.floor(padY * 0.75)));
+  let perimCount = 0;
+
   for (let row = 0; row < h; row += 1) {
-    const isPerimRow = row < 2 || row >= h - 2;
+    const isPerimRow = row < perimThickness || row >= h - perimThickness;
     for (let col = 0; col < w; col += 1) {
-      if (isPerimRow || col < 2 || col >= w - 2) {
+      const isPerim = isPerimRow || col < perimThickness || col >= w - perimThickness;
+      if (isPerim) {
+        perimCount += 1;
         const idx = (row * w + col) * 4;
-        const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-        bgLumSum += lum;
-        bgCount += 1;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+        let bin = perimBins.get(key);
+        if (!bin) {
+          bin = { count: 0, r: 0, g: 0, b: 0 };
+          perimBins.set(key, bin);
+        }
+        bin.count += 1;
+        bin.r += r;
+        bin.g += g;
+        bin.b += b;
       }
     }
   }
-  const avgBgLum = bgCount > 0 ? bgLumSum / bgCount : 255;
 
-  // 2. Identify ink pixels that contrast with the background
+  let bestBin: { count: number; r: number; g: number; b: number } | null = null;
+  for (const bin of perimBins.values()) {
+    if (!bestBin || bin.count > bestBin.count) bestBin = bin;
+  }
+
+  if (bestBin && bestBin.count > 0) {
+    const sampledR = Math.round(bestBin.r / bestBin.count);
+    const sampledG = Math.round(bestBin.g / bestBin.count);
+    const sampledB = Math.round(bestBin.b / bestBin.count);
+
+    if (!hasValidPaperHint || (pr === 255 && pg === 255 && pb === 255 && bestBin.count > perimCount * 0.3)) {
+      pr = sampledR;
+      pg = sampledG;
+      pb = sampledB;
+    }
+  }
+
+  if (pr >= 252 && pg >= 252 && pb >= 252) {
+    pr = 255;
+    pg = 255;
+    pb = 255;
+  }
+
+  // 2. Check if the background is uniform (solid color)
+  let uniformMatches = 0;
+  for (let row = 0; row < h; row += 1) {
+    const isPerimRow = row < perimThickness || row >= h - perimThickness;
+    for (let col = 0; col < w; col += 1) {
+      if (isPerimRow || col < perimThickness || col >= w - perimThickness) {
+        const idx = (row * w + col) * 4;
+        const distSq = (data[idx] - pr) ** 2 + (data[idx + 1] - pg) ** 2 + (data[idx + 2] - pb) ** 2;
+        if (distSq <= 400) uniformMatches += 1;
+      }
+    }
+  }
+  const isUniformBg = perimCount > 0 && uniformMatches / perimCount >= 0.7;
+
+  // 3. Mark ink pixels that contrast with the background
   const isInk = new Uint8Array(w * h);
+  const bgLum = 0.299 * pr + 0.587 * pg + 0.114 * pb;
+
   for (let row = 0; row < h; row += 1) {
     for (let col = 0; col < w; col += 1) {
       const idx = (row * w + col) * 4;
-      const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-      if (avgBgLum > 128) {
-        if (lum < Math.min(200, avgBgLum - 20)) {
-          isInk[row * w + col] = 1;
-        }
-      } else {
-        if (lum > avgBgLum + 20) {
-          isInk[row * w + col] = 1;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const distSq = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (distSq >= 225 || Math.abs(lum - bgLum) >= 12) {
+        isInk[row * w + col] = 1;
+      }
+    }
+  }
+
+  // 4. Dilate ink mask to completely consume subpixel anti-aliasing edges and font shadows
+  const dilateRadius = Math.max(1, Math.min(2, Math.round(scale * 0.8)));
+  const dilatedMask = new Uint8Array(w * h);
+  for (let row = 0; row < h; row += 1) {
+    for (let col = 0; col < w; col += 1) {
+      if (isInk[row * w + col]) {
+        for (let dr = -dilateRadius; dr <= dilateRadius; dr += 1) {
+          const nr = row + dr;
+          if (nr < 0 || nr >= h) continue;
+          for (let dc = -dilateRadius; dc <= dilateRadius; dc += 1) {
+            const nc = col + dc;
+            if (nc >= 0 && nc < w) {
+              dilatedMask[nr * w + nc] = 1;
+            }
+          }
         }
       }
     }
   }
 
-  // 3. Inpaint ink pixels from nearest non-ink neighbors (bidirectional for best watermark continuity)
-  for (let row = 0; row < h; row += 1) {
-    for (let col = 0; col < w; col += 1) {
-      const idx = row * w + col;
-      if (isInk[idx]) {
-        // Horizontal nearest non-ink
-        let lCol = col - 1;
-        while (lCol >= 0 && isInk[row * w + lCol]) lCol -= 1;
-        let rCol = col + 1;
-        while (rCol < w && isInk[row * w + rCol]) rCol += 1;
-        const hasL = lCol >= 0;
-        const hasR = rCol < w;
-        const distH = (hasL ? col - lCol : 999) + (hasR ? rCol - col : 999);
+  // 5. Clean / Inpaint
+  if (isUniformBg) {
+    // Solid background: fill ink + anti-aliased edge with the pure paper color
+    for (let row = 0; row < h; row += 1) {
+      for (let col = 0; col < w; col += 1) {
+        if (dilatedMask[row * w + col]) {
+          const idx = (row * w + col) * 4;
+          data[idx] = pr;
+          data[idx + 1] = pg;
+          data[idx + 2] = pb;
+          data[idx + 3] = 255;
+        }
+      }
+    }
+  } else {
+    // Non-uniform background (watermark / texture): 4-directional inverse-distance weighting
+    for (let row = 0; row < h; row += 1) {
+      for (let col = 0; col < w; col += 1) {
+        const idx = row * w + col;
+        if (dilatedMask[idx]) {
+          let lCol = col - 1;
+          while (lCol >= 0 && dilatedMask[row * w + lCol]) lCol -= 1;
+          let rCol = col + 1;
+          while (rCol < w && dilatedMask[row * w + rCol]) rCol += 1;
 
-        // Vertical nearest non-ink
-        let tRow = row - 1;
-        while (tRow >= 0 && isInk[tRow * w + col]) tRow -= 1;
-        let bRow = row + 1;
-        while (bRow < h && isInk[bRow * w + col]) bRow += 1;
-        const hasT = tRow >= 0;
-        const hasB = bRow < h;
-        const distV = (hasT ? row - tRow : 999) + (hasB ? bRow - row : 999);
+          let tRow = row - 1;
+          while (tRow >= 0 && dilatedMask[tRow * w + col]) tRow -= 1;
+          let bRow = row + 1;
+          while (bRow < h && dilatedMask[bRow * w + col]) bRow += 1;
 
-        const pIdx = idx * 4;
+          let sumR = 0;
+          let sumG = 0;
+          let sumB = 0;
+          let sumW = 0;
 
-        if (distV < distH && (hasT || hasB)) {
-          if (hasT && hasB) {
-            const dT = row - tRow;
-            const dB = bRow - row;
-            const total = dT + dB;
-            const tIdx = (tRow * w + col) * 4;
-            const bIdx = (bRow * w + col) * 4;
-            data[pIdx] = Math.round((data[tIdx] * dB + data[bIdx] * dT) / total);
-            data[pIdx + 1] = Math.round((data[tIdx + 1] * dB + data[bIdx + 1] * dT) / total);
-            data[pIdx + 2] = Math.round((data[tIdx + 2] * dB + data[bIdx + 2] * dT) / total);
-          } else if (hasT) {
-            const tIdx = (tRow * w + col) * 4;
-            data[pIdx] = data[tIdx];
-            data[pIdx + 1] = data[tIdx + 1];
-            data[pIdx + 2] = data[tIdx + 2];
-          } else if (hasB) {
-            const bIdx = (bRow * w + col) * 4;
-            data[pIdx] = data[bIdx];
-            data[pIdx + 1] = data[bIdx + 1];
-            data[pIdx + 2] = data[bIdx + 2];
+          if (lCol >= 0) {
+            const d = col - lCol;
+            const wgt = 1 / d;
+            const p = (row * w + lCol) * 4;
+            sumR += data[p] * wgt;
+            sumG += data[p + 1] * wgt;
+            sumB += data[p + 2] * wgt;
+            sumW += wgt;
           }
-        } else if (hasL || hasR) {
-          if (hasL && hasR) {
-            const dL = col - lCol;
-            const dR = rCol - col;
-            const total = dL + dR;
-            const lIdx = (row * w + lCol) * 4;
-            const rIdx = (row * w + rCol) * 4;
-            data[pIdx] = Math.round((data[lIdx] * dR + data[rIdx] * dL) / total);
-            data[pIdx + 1] = Math.round((data[lIdx + 1] * dR + data[rIdx + 1] * dL) / total);
-            data[pIdx + 2] = Math.round((data[lIdx + 2] * dR + data[rIdx + 2] * dL) / total);
-          } else if (hasL) {
-            const lIdx = (row * w + lCol) * 4;
-            data[pIdx] = data[lIdx];
-            data[pIdx + 1] = data[lIdx + 1];
-            data[pIdx + 2] = data[lIdx + 2];
-          } else if (hasR) {
-            const rIdx = (row * w + rCol) * 4;
-            data[pIdx] = data[rIdx];
-            data[pIdx + 1] = data[rIdx + 1];
-            data[pIdx + 2] = data[rIdx + 2];
+          if (rCol < w) {
+            const d = rCol - col;
+            const wgt = 1 / d;
+            const p = (row * w + rCol) * 4;
+            sumR += data[p] * wgt;
+            sumG += data[p + 1] * wgt;
+            sumB += data[p + 2] * wgt;
+            sumW += wgt;
           }
+          if (tRow >= 0) {
+            const d = row - tRow;
+            const wgt = 1 / d;
+            const p = (tRow * w + col) * 4;
+            sumR += data[p] * wgt;
+            sumG += data[p + 1] * wgt;
+            sumB += data[p + 2] * wgt;
+            sumW += wgt;
+          }
+          if (bRow < h) {
+            const d = bRow - row;
+            const wgt = 1 / d;
+            const p = (bRow * w + col) * 4;
+            sumR += data[p] * wgt;
+            sumG += data[p + 1] * wgt;
+            sumB += data[p + 2] * wgt;
+            sumW += wgt;
+          }
+
+          const pIdx = idx * 4;
+          if (sumW > 0) {
+            data[pIdx] = Math.round(sumR / sumW);
+            data[pIdx + 1] = Math.round(sumG / sumW);
+            data[pIdx + 2] = Math.round(sumB / sumW);
+          } else {
+            data[pIdx] = pr;
+            data[pIdx + 1] = pg;
+            data[pIdx + 2] = pb;
+          }
+          data[pIdx + 3] = 255;
         }
       }
     }

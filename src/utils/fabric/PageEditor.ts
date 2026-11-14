@@ -221,7 +221,7 @@ export class PageEditor {
           fontSize: obj.fontSize,
           baseline: obj.sourceBaseline,
         };
-        healLineOnCanvas(pdfCanvas, lineInfo, this.page.width);
+        healLineOnCanvas(pdfCanvas, lineInfo, this.page.width, obj.sourcePaper);
       }
     }
   }
@@ -418,7 +418,7 @@ export class PageEditor {
         fontSize: tb.fontSize,
         baseline: tb.sourceBaseline,
       };
-      healLineOnCanvas(pdfCanvas, lineInfo, this.page.width);
+      healLineOnCanvas(pdfCanvas, lineInfo, this.page.width, tb.sourcePaper);
 
       // Capture the healed background patch for export so watermarks & textures are 100% preserved
       try {
@@ -919,6 +919,7 @@ export class PageEditor {
     const toRemove: FabricObject[] = [];
     for (const o of objs) {
       if (o instanceof Textbox && o.sourceLineId) {
+        this.materializeOverlay(o);
         o.set({ text: '', visible: false, selectable: false, evented: false });
       } else {
         toRemove.push(o);

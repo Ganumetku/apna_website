@@ -33,7 +33,7 @@ export function healCanvasForPage(canvas: HTMLCanvasElement, pageIndex: number, 
         baseline: obj.sourceBaseline,
       };
 
-      healLineOnCanvas(canvas, lineInfo, pageWidth);
+      healLineOnCanvas(canvas, lineInfo, pageWidth, obj.sourcePaper);
     }
   }
 
@@ -55,6 +55,7 @@ export function healCanvasForPage(canvas: HTMLCanvasElement, pageIndex: number, 
         top?: number;
         width?: number;
         height?: number;
+        sourcePaper?: string;
         fontSize?: number;
         scaleX?: number;
         scaleY?: number;
@@ -74,7 +75,7 @@ export function healCanvasForPage(canvas: HTMLCanvasElement, pageIndex: number, 
         baseline: tb.sourceBaseline,
       };
 
-      healLineOnCanvas(canvas, lineInfo, pageWidth);
+      healLineOnCanvas(canvas, lineInfo, pageWidth, tb.sourcePaper);
     }
   }
 }

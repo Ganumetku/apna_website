@@ -9,8 +9,13 @@ export function isEmbedMode(): boolean {
   return new URLSearchParams(window.location.search).get('embed') === '1';
 }
 
-/** Always allowed, so Toolwala works even before a Vercel env var is set. */
-const DEFAULT_PARENT_ORIGINS = ['https://toolwala.co', 'https://www.toolwala.co'];
+/** Always allowed, so Toolwala and ToolGPT work even before a Vercel env var is set. */
+const DEFAULT_PARENT_ORIGINS = [
+  'https://toolwala.co',
+  'https://www.toolwala.co',
+  'https://toolgpt.in',
+  'https://www.toolgpt.in',
+];
 
 /** Comma-separated parent origins that may talk to the editor. */
 export function allowedOrigins(): string[] {
